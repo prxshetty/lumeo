@@ -1,0 +1,8 @@
+./venv
+/venv
+.venv
+.env
+
+.chainlit
+chainlit.md
+__pycache__/

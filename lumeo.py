@@ -1,14 +1,15 @@
-import os
-import json
 import asyncio
 import io
-import pyaudio
-from contextlib import asynccontextmanager
-
-import chainlit as cl
+import ssl
+import sys
+import os
+from typing import Optional, Dict, Any
 from uuid import uuid4
-from chainlit.logger import logger
-from tools import tools
+import chainlit as cl
+import pyaudio
+from dotenv import load_dotenv
+import traceback
+
 from speechmatics_flow.client import WebsocketClient
 from speechmatics_flow.models import (
     ConnectionSettings,
@@ -18,188 +19,243 @@ from speechmatics_flow.models import (
     ServerMessageType,
 )
 
-class FlowSession:
+from utils.common import logger
+
+# Load environment variables
+load_dotenv()
+
+# Get auth token from environment variable
+AUTH_TOKEN = os.getenv("SPEECHMATICS_AUTH_TOKEN")
+
+if not AUTH_TOKEN:
+    raise ValueError("Please set SPEECHMATICS_AUTH_TOKEN in your .env file")
+
+# Audio configuration
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000
+CHUNK_SIZE = 1024
+
+class AudioState:
     def __init__(self):
-        self.client = None
-        self.audio_buffer = io.BytesIO()
-        self.active = False
+        self.input_queue = asyncio.Queue()
+        self.output_buffer = io.BytesIO()
+        self.is_processing = False
+        self.audio_session = None
         self.playback_task = None
-        self._lock = asyncio.Lock()
-        self._retry_count = 0
-        self._max_retries = 3
-        self._retry_delay = 2
-
-    async def reset(self):
-        """Reset session state"""
-        self.active = False
-        self._retry_count = 0
-        if self.playback_task and not self.playback_task.done():
-            self.playback_task.cancel()
-            try:
-                await self.playback_task
-            except asyncio.CancelledError:
-                pass
-        self.audio_buffer = io.BytesIO()
-
-    @asynccontextmanager
-    async def start_session(self):
-        if self.active:
-            await self.reset()  # Reset if already active
+        self.client = None
+        # Initialize PyAudio
+        self.pyaudio = pyaudio.PyAudio()
+        # Find input and output devices
+        self.input_device = self.get_input_device()
+        self.output_device = self.get_output_device()
+        self.current_message = None  # Add this to track current message
         
-        while self._retry_count < self._max_retries:
-            try:
-                self.active = True
-                yield self
-                break
-            except Exception as e:
-                self._retry_count += 1
-                if "Concurrent Quota Exceeded" in str(e):
-                    logger.warning(f"Quota exceeded, attempt {self._retry_count}/{self._max_retries}. Waiting {self._retry_delay}s...")
-                    await asyncio.sleep(self._retry_delay)
-                    self._retry_delay *= 2
-                else:
-                    logger.error(f"Session error: {str(e)}")
-                    await self.reset()
-                    raise
-
-async def audio_playback(buffer):
-    """Read from buffer and play audio back to the user"""
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, output=True)
-    try:
-        while True:
-            audio_to_play = buffer.getvalue()
-            if audio_to_play:
-                stream.write(audio_to_play)
-                buffer.seek(0)
-                buffer.truncate(0)
-            await asyncio.sleep(0.05)
-    finally:
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-
-async def setup_flow_realtime():
-    """Initialize Speechmatics Flow connection"""
-    auth_token = os.getenv("SPEECHMATICS_AUTH_TOKEN")
-    if not auth_token:
-        logger.error("❌ SPEECHMATICS_AUTH_TOKEN not found in environment variables")
-        return None
-        
-    settings = ConnectionSettings(
-        url="wss://flow.api.speechmatics.com/v1/flow",
-        auth_token=auth_token
-    )
+    def get_input_device(self):
+        """Get the default input device index"""
+        return self.pyaudio.get_default_input_device_info()['index']
     
+    def get_output_device(self):
+        """Find headphones/earphones device"""
+        for i in range(self.pyaudio.get_device_count()):
+            device_info = self.pyaudio.get_device_info_by_index(i)
+            device_name = device_info['name'].lower()
+            # Look for headphones or earphones in device name
+            if ('headphone' in device_name or 'earphone' in device_name) and device_info['maxOutputChannels'] > 0:
+                return i
+        # Fallback to default output device
+        return self.pyaudio.get_default_output_device_info()['index']
+
+    def cleanup(self):
+        """Cleanup PyAudio resources"""
+        if self.pyaudio:
+            self.pyaudio.terminate()
+
+audio_state = AudioState()
+
+# Create a buffer to store binary messages sent from the server
+audio_buffer = io.BytesIO()
+
+# Create a websocket client
+client = WebsocketClient(
+    ConnectionSettings(
+        url="wss://flow.api.speechmatics.com/v1/flow",
+        auth_token=AUTH_TOKEN,
+    )
+)
+
+# Create callback function which adds binary messages to audio buffer
+def binary_msg_handler(msg: bytes):
+    if isinstance(msg, (bytes, bytearray)):
+        audio_state.output_buffer.write(msg)
+
+# Register the callback
+client.add_event_handler(ServerMessageType.AddAudio, binary_msg_handler)
+
+# Handle transcriptions for UI updates
+async def transcription_handler(msg: Dict[str, Any]):
+    """Handle transcriptions with real-time UI updates"""
+    if "transcript" in msg:
+        transcript = msg["transcript"].strip()
+        if transcript:
+            if audio_state.current_message:
+                # Update existing message
+                await audio_state.current_message.update(content=transcript)
+            else:
+                # Create new message
+                audio_state.current_message = cl.Message(
+                    content=transcript,
+                    author="You",
+                    metadata={
+                        "style": {
+                            "background": "#f0f0f0",
+                            "borderRadius": "8px",
+                            "padding": "10px",
+                            "margin": "5px 0"
+                        }
+                    }
+                )
+                await audio_state.current_message.send()
+
+client.add_event_handler(ServerMessageType.AddTranscript, transcription_handler)
+
+async def audio_playback():
+    """Play audio from output buffer with state management"""
     try:
-        session = FlowSession()
-        session.client = WebsocketClient(settings)
+        stream = audio_state.pyaudio.open(
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=RATE,
+            output=True,
+            output_device_index=audio_state.output_device,
+            frames_per_buffer=CHUNK_SIZE
+        )
+        
+        while True:
+            if audio_state.output_buffer.tell() > 0:
+                audio_state.is_processing = True
+                audio_data = audio_state.output_buffer.getvalue()
+                stream.write(audio_data)
+                audio_state.output_buffer.seek(0)
+                audio_state.output_buffer.truncate()
+                audio_state.is_processing = False
+            await asyncio.sleep(0.01)
+    finally:
+        if stream:
+            stream.stop_stream()
+            stream.close()
 
-        def binary_msg_handler(msg: bytes):
-            if isinstance(msg, (bytes, bytearray)):
-                session.audio_buffer.write(msg)
+async def process_input():
+    """Process input audio chunks from queue"""
+    while True:
+        chunk = await audio_state.input_queue.get()
+        if chunk is None:
+            break
+        if audio_state.client and audio_state.audio_session:
+            await audio_state.client.send_audio(chunk)
 
-        session.client.add_event_handler(ServerMessageType.AddAudio, binary_msg_handler)
-        cl.user_session.set("flow_session", session)
-        logger.info("✅ Successfully initialized Speechmatics Flow connection")
-        return session
-    except Exception as e:
-        logger.error(f"❌ Error initializing Speechmatics Flow: {str(e)}")
-        return None
+def print_audio_devices():
+    """Debug function to list all audio devices"""
+    p = pyaudio.PyAudio()
+    for i in range(p.get_device_count()):
+        dev = p.get_device_info_by_index(i)
+        logger.info(f"Device {i}: {dev['name']}")
+    p.terminate()
 
+# Chainlit event handlers
 @cl.on_chat_start
 async def start():
-    session = await setup_flow_realtime()
-    if session:
-        await cl.Message(content="Hello! I'm here. Press `P` to talk!").send()
-    else:
-        await cl.Message(
-            content="Error: Could not initialize Speechmatics connection. Please check your API key and try again."
-        ).send()
-
-@cl.on_message
-async def on_message(message: cl.Message):
-    session = cl.user_session.get("flow_session")
-    if session and session.active:
-        async with session._lock:
-            try:
-                await session.client.run(
-                    interactions=[Interaction(text=message.content)],
-                    audio_settings=AudioSettings(),
-                    conversation_config=ConversationConfig(),
-                )
-            except Exception as e:
-                logger.error(f"Error processing message: {str(e)}")
-                await cl.Message(content=f"Error: {str(e)}").send()
-    else:
-        await cl.Message(content="Please activate voice mode first!").send()
+    print_audio_devices()
+    await cl.Message(content="Hello! I'm here. Press `P` to talk!").send()
+    
+    # Log audio devices
+    logger.info(f"Using output device: {audio_state.pyaudio.get_device_info_by_index(audio_state.output_device)['name']}")
+    logger.info(f"Using input device: {audio_state.pyaudio.get_device_info_by_index(audio_state.input_device)['name']}")
+    
+    audio_state.client = WebsocketClient(
+        ConnectionSettings(
+            url="wss://flow.api.speechmatics.com/v1/flow",
+            auth_token=AUTH_TOKEN,
+        )
+    )
+    audio_state.client.add_event_handler(ServerMessageType.AddAudio, binary_msg_handler)
+    audio_state.client.add_event_handler(ServerMessageType.AddTranscript, transcription_handler)
+    audio_state.playback_task = asyncio.create_task(audio_playback())
 
 @cl.on_audio_start
 async def on_audio_start():
+    """Handle start of audio input"""
     try:
-        session = cl.user_session.get("flow_session")
-        if not session:
-            return False
-
-        async with session.start_session():
-            if session._retry_count >= session._max_retries:
-                await cl.Message(content="Could not establish connection after multiple attempts. Please try again later.").send()
-                return False
-
-            await session.client.run(
-                interactions=[],
-                audio_settings=AudioSettings(),
-                conversation_config=ConversationConfig(),
-            )
+        if not audio_state.is_processing:
+            # Reset current message at start of new audio
+            audio_state.current_message = None
             
-            session.playback_task = asyncio.create_task(audio_playback(session.audio_buffer))
+            audio_state.audio_session = asyncio.create_task(
+                audio_state.client.run(
+                    interactions=[Interaction(sys.stdin.buffer)],
+                    audio_settings=AudioSettings(),
+                    conversation_config=ConversationConfig(),
+                )
+            )
+            logger.info("Started audio session")
             return True
     except Exception as e:
-        logger.error(f"Connection failed: {str(e)}")
-        await cl.ErrorMessage(content=f"Connection failed: {str(e)}").send()
+        logger.error(f"Error starting audio: {str(e)}")
+        await cl.ErrorMessage(content=f"Audio error: {str(e)}").send()
         return False
 
 @cl.on_audio_chunk
 async def on_audio_chunk(chunk: cl.InputAudioChunk):
-    session = cl.user_session.get("flow_session")
-    if session and session.active:
-        async with session._lock:
-            try:
-                # Ensure we have valid audio data
-                if not chunk.data or len(chunk.data) == 0:
-                    logger.warning("Received empty audio chunk")
-                    return
-
-                await session.client.run(
-                    interactions=[],
-                    audio_settings=AudioSettings(
-                        sample_rate=16000,
-                        chunk_size=1024
-                    ),
-                    audio_data=chunk.data
-                )
-            except Exception as e:
-                logger.error(f"Error sending audio: {str(e)}")
-                await session.reset()
+    """Handle incoming audio chunks with processing check"""
+    if not audio_state.is_processing and chunk.data:
+        await audio_state.input_queue.put(chunk.data)
 
 @cl.on_audio_end
+async def on_audio_end():
+    """Handle end of audio input"""
+    # Finalize current message
+    audio_state.current_message = None
+    
+    if audio_state.audio_session and not audio_state.audio_session.done():
+        audio_state.audio_session.cancel()
+        try:
+            await audio_state.audio_session
+        except asyncio.CancelledError:
+            pass
+        audio_state.audio_session = None
+
 @cl.on_chat_end
 @cl.on_stop
 async def on_end():
-    try:
-        session = cl.user_session.get("flow_session")
-        if session:
-            async with session._lock:
-                if session.active:
-                    await session.client.run(
-                        interactions=[],
-                        audio_settings=AudioSettings(),
-                        conversation_config=ConversationConfig(),
-                        close=True
-                    )
-                await session.reset()
-    except Exception as e:
-        logger.error(f"Error during cleanup: {str(e)}")
+    """Cleanup resources"""
+    # Cancel playback task
+    if audio_state.playback_task:
+        audio_state.playback_task.cancel()
+        try:
+            await audio_state.playback_task
+        except asyncio.CancelledError:
+            pass
+        audio_state.playback_task = None
+    
+    # Cancel audio session if running
+    if audio_state.audio_session:
+        audio_state.audio_session.cancel()
+        try:
+            await audio_state.audio_session
+        except asyncio.CancelledError:
+            pass
+        audio_state.audio_session = None
+    
+    # Clear buffers
+    audio_state.output_buffer.seek(0)
+    audio_state.output_buffer.truncate()
+    
+    # Reset state
+    audio_state.is_processing = False
+    audio_state.client = None
+    
+    # Cleanup PyAudio
+    audio_state.cleanup()
 
-                
-
+if __name__ == "__main__":
+    cl.run()

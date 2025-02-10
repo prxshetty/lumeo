@@ -1,50 +1,73 @@
 """Internet search tool using Tavily API."""
 
-import chainlit as cl
-from utils.common import logger, tavily_client
+from typing import Dict, Any, List
+from utils.common import tavily_client, logger
 
 internet_search_def = {
     "name": "internet_search",
-    "description": "Performs an internet search using the Tavily API.",
+    "description": "Search the internet for real-time information using Tavily's search API.",
     "parameters": {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "The search query to look up on the internet (e.g., 'What's the weather like in Madrid tomorrow?').",
+                "description": "The search query to execute"
             },
+            "search_depth": {
+                "type": "string",
+                "description": "The depth of search (basic or deep)",
+                "enum": ["basic", "deep"],
+                "default": "basic"
+            }
         },
-        "required": ["query"],
-    },
+        "required": ["query"]
+    }
 }
 
-
-async def internet_search_handler(query):
-    """Executes an internet search using the Tavily API and returns the result."""
+async def internet_search_handler(query: str, search_depth: str = "basic") -> Dict[str, Any]:
+    """Handler function for internet searches.
+    
+    Args:
+        query: The search query to execute
+        search_depth: The depth of search (basic or deep)
+        
+    Returns:
+        Dict containing search results or error message
+    """
     try:
-        logger.info(f"🕵 Performing internet search for query: '{query}'")
-        response = tavily_client.search(query)
-
-        results = response.get("results", [])
-        if not results:
-            await cl.Message(content=f"No results found for '{query}'.").send()
-            return None
-
-        formatted_results = "\n".join(
-            [
-                f"{i+1}. [{result['title']}]({result['url']})\n{result['content'][:200]}..."
-                for i, result in enumerate(results)
-            ]
+        logger.info(f"🔍 Searching for: {query}")
+        
+        if not tavily_client:
+            raise ValueError("Tavily client not initialized. Please check your API key.")
+            
+        # Execute search
+        search_result = await tavily_client.search(
+            query=query,
+            search_depth=search_depth,
+            max_results=5
         )
-
-        message_content = f"Search Results for '{query}':\n\n{formatted_results}"
-        await cl.Message(content=message_content).send()
-
-        logger.info(f"📏 Search results for '{query}' retrieved successfully.")
-        return response["results"]
+        
+        # Format results
+        formatted_results = []
+        for result in search_result.get("results", []):
+            formatted_results.append({
+                "title": result.get("title"),
+                "content": result.get("content"),
+                "url": result.get("url"),
+                "score": result.get("score", 0)
+            })
+            
+        response = {
+            "query": query,
+            "results": formatted_results,
+            "total_results": len(formatted_results)
+        }
+        
+        logger.info(f"💡 Found {len(formatted_results)} results for query: {query}")
+        return response
+        
     except Exception as e:
-        logger.error(f"❌ Error performing internet search: {str(e)}")
-        await cl.Message(content=f"An error occurred while performing the search: {str(e)}").send()
-
+        logger.error(f"❌ Error executing search: {str(e)}")
+        return {"error": str(e)}
 
 internet_search = (internet_search_def, internet_search_handler)

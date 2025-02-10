@@ -1,0 +1,26 @@
+# Core requirements
+chainlit
+speechmatics-flow
+python-dotenv
+plotly
+pandas
+numpy
+
+# Tools specific requirements
+yfinance  # for stock.py
+pydantic  # for data validation across tools
+PyYAML    # for database.py schema loading
+langchain-groq  # for Groq LLM
+httpx     # for API calls
+websockets # for real-time communication
+pyaudio   # for audio processing
+
+# API Clients
+tavily-python  # for search.py
+together  # for image generation
+langchain  # for prompts and tools
+
+# Database
+sqlalchemy  # for database.py
+psycopg2-binary  # for PostgreSQL support
+mysql-connector-python  # for MySQL support 

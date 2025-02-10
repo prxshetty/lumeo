@@ -1,121 +1,205 @@
-"""
-Derived from https://github.com/Chainlit/cookbook/tree/main/realtime-assistant
-"""
-
 import os
+import json
 import asyncio
-import traceback
+import io
+import pyaudio
+from contextlib import asynccontextmanager
 
 import chainlit as cl
 from uuid import uuid4
 from chainlit.logger import logger
-
-from realtime import RealtimeClient
 from tools import tools
-                                   
-async def setup_openai_realtime():
-    """Instantiate and configure the OpenAI Realtime Client"""
-    openai_realtime = RealtimeClient()
-    cl.user_session.set("track_id", str(uuid4()))
+from speechmatics_flow.client import WebsocketClient
+from speechmatics_flow.models import (
+    ConnectionSettings,
+    Interaction,
+    AudioSettings,
+    ConversationConfig,
+    ServerMessageType,
+)
 
-    async def handle_conversation_updated(event):
-        item = event.get("item")
-        delta = event.get("delta")
-        """Currently used to stream audio back to the client."""
-        if delta:
-            # Only one of the following will be populated for any given event
-            if "audio" in delta:
-                audio = delta["audio"]  # Int16Array, audio added
-                await cl.context.emitter.send_audio_chunk(
-                    cl.OutputAudioChunk(
-                        mimeType="pcm16",
-                        data=audio,
-                        track=cl.user_session.get("track_id"),
-                    )
-                )
-            if "transcript" in delta:
-                transcript = delta["transcript"]  # string, transcript added
+class FlowSession:
+    def __init__(self):
+        self.client = None
+        self.audio_buffer = io.BytesIO()
+        self.active = False
+        self.playback_task = None
+        self._lock = asyncio.Lock()
+        self._retry_count = 0
+        self._max_retries = 3
+        self._retry_delay = 2
+
+    async def reset(self):
+        """Reset session state"""
+        self.active = False
+        self._retry_count = 0
+        if self.playback_task and not self.playback_task.done():
+            self.playback_task.cancel()
+            try:
+                await self.playback_task
+            except asyncio.CancelledError:
                 pass
-            if "arguments" in delta:
-                arguments = delta["arguments"]  # string, function arguments added
-                pass
+        self.audio_buffer = io.BytesIO()
 
-    async def handle_item_completed(item):
-        """Used to populate the chat context with transcription once an item is completed."""
-        # print(item) # TODO
-        pass
+    @asynccontextmanager
+    async def start_session(self):
+        if self.active:
+            await self.reset()  # Reset if already active
+        
+        while self._retry_count < self._max_retries:
+            try:
+                self.active = True
+                yield self
+                break
+            except Exception as e:
+                self._retry_count += 1
+                if "Concurrent Quota Exceeded" in str(e):
+                    logger.warning(f"Quota exceeded, attempt {self._retry_count}/{self._max_retries}. Waiting {self._retry_delay}s...")
+                    await asyncio.sleep(self._retry_delay)
+                    self._retry_delay *= 2
+                else:
+                    logger.error(f"Session error: {str(e)}")
+                    await self.reset()
+                    raise
 
-    async def handle_conversation_interrupt(event):
-        """Used to cancel the client previous audio playback."""
-        cl.user_session.set("track_id", str(uuid4()))
-        await cl.context.emitter.send_audio_interrupt()
+async def audio_playback(buffer):
+    """Read from buffer and play audio back to the user"""
+    p = pyaudio.PyAudio()
+    stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, output=True)
+    try:
+        while True:
+            audio_to_play = buffer.getvalue()
+            if audio_to_play:
+                stream.write(audio_to_play)
+                buffer.seek(0)
+                buffer.truncate(0)
+            await asyncio.sleep(0.05)
+    finally:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
 
-    async def handle_error(event):
-        logger.error(event)
+async def setup_flow_realtime():
+    """Initialize Speechmatics Flow connection"""
+    auth_token = os.getenv("SPEECHMATICS_AUTH_TOKEN")
+    if not auth_token:
+        logger.error("❌ SPEECHMATICS_AUTH_TOKEN not found in environment variables")
+        return None
+        
+    settings = ConnectionSettings(
+        url="wss://flow.api.speechmatics.com/v1/flow",
+        auth_token=auth_token
+    )
+    
+    try:
+        session = FlowSession()
+        session.client = WebsocketClient(settings)
 
-    openai_realtime.on("conversation.updated", handle_conversation_updated)
-    openai_realtime.on("conversation.item.completed", handle_item_completed)
-    openai_realtime.on("conversation.interrupted", handle_conversation_interrupt)
-    openai_realtime.on("error", handle_error)
+        def binary_msg_handler(msg: bytes):
+            if isinstance(msg, (bytes, bytearray)):
+                session.audio_buffer.write(msg)
 
-    cl.user_session.set("openai_realtime", openai_realtime)
-    coros = [
-        openai_realtime.add_tool(tool_def, tool_handler)
-        for tool_def, tool_handler in tools
-    ]
-    await asyncio.gather(*coros)
-
+        session.client.add_event_handler(ServerMessageType.AddAudio, binary_msg_handler)
+        cl.user_session.set("flow_session", session)
+        logger.info("✅ Successfully initialized Speechmatics Flow connection")
+        return session
+    except Exception as e:
+        logger.error(f"❌ Error initializing Speechmatics Flow: {str(e)}")
+        return None
 
 @cl.on_chat_start
 async def start():
-    await cl.Message(content="Hello! I'm here. Press `P` to talk!").send()
-    await setup_openai_realtime()
-
+    session = await setup_flow_realtime()
+    if session:
+        await cl.Message(content="Hello! I'm here. Press `P` to talk!").send()
+    else:
+        await cl.Message(
+            content="Error: Could not initialize Speechmatics connection. Please check your API key and try again."
+        ).send()
 
 @cl.on_message
 async def on_message(message: cl.Message):
-    openai_realtime: RealtimeClient = cl.user_session.get("openai_realtime")
-    if openai_realtime and openai_realtime.is_connected():
-        # TODO: Try image processing with message.elements
-        await openai_realtime.send_user_message_content(
-            [{"type": "input_text", "text": message.content}]
-        )
+    session = cl.user_session.get("flow_session")
+    if session and session.active:
+        async with session._lock:
+            try:
+                await session.client.run(
+                    interactions=[Interaction(text=message.content)],
+                    audio_settings=AudioSettings(),
+                    conversation_config=ConversationConfig(),
+                )
+            except Exception as e:
+                logger.error(f"Error processing message: {str(e)}")
+                await cl.Message(content=f"Error: {str(e)}").send()
     else:
-        await cl.Message(
-            content="Please activate voice mode before sending messages!"
-        ).send()
-
+        await cl.Message(content="Please activate voice mode first!").send()
 
 @cl.on_audio_start
 async def on_audio_start():
     try:
-        openai_realtime: RealtimeClient = cl.user_session.get("openai_realtime")
-        await openai_realtime.connect()
-        logger.info("Connected to OpenAI realtime")
-        # TODO: might want to recreate items to restore context
-        # openai_realtime.create_conversation_item(item)
-        return True
-    except Exception as e:
-        print(traceback.format_exc())
-        await cl.ErrorMessage(
-            content=f"Failed to connect to OpenAI realtime: {e}"
-        ).send()
-        return False
+        session = cl.user_session.get("flow_session")
+        if not session:
+            return False
 
+        async with session.start_session():
+            if session._retry_count >= session._max_retries:
+                await cl.Message(content="Could not establish connection after multiple attempts. Please try again later.").send()
+                return False
+
+            await session.client.run(
+                interactions=[],
+                audio_settings=AudioSettings(),
+                conversation_config=ConversationConfig(),
+            )
+            
+            session.playback_task = asyncio.create_task(audio_playback(session.audio_buffer))
+            return True
+    except Exception as e:
+        logger.error(f"Connection failed: {str(e)}")
+        await cl.ErrorMessage(content=f"Connection failed: {str(e)}").send()
+        return False
 
 @cl.on_audio_chunk
 async def on_audio_chunk(chunk: cl.InputAudioChunk):
-    openai_realtime: RealtimeClient = cl.user_session.get("openai_realtime")
-    if openai_realtime.is_connected():
-        await openai_realtime.append_input_audio(chunk.data)
-    else:
-        logger.info("RealtimeClient is not connected")
+    session = cl.user_session.get("flow_session")
+    if session and session.active:
+        async with session._lock:
+            try:
+                # Ensure we have valid audio data
+                if not chunk.data or len(chunk.data) == 0:
+                    logger.warning("Received empty audio chunk")
+                    return
 
+                await session.client.run(
+                    interactions=[],
+                    audio_settings=AudioSettings(
+                        sample_rate=16000,
+                        chunk_size=1024
+                    ),
+                    audio_data=chunk.data
+                )
+            except Exception as e:
+                logger.error(f"Error sending audio: {str(e)}")
+                await session.reset()
 
 @cl.on_audio_end
 @cl.on_chat_end
 @cl.on_stop
 async def on_end():
-    openai_realtime: RealtimeClient = cl.user_session.get("openai_realtime")
-    if openai_realtime and openai_realtime.is_connected():
-        await openai_realtime.disconnect()
+    try:
+        session = cl.user_session.get("flow_session")
+        if session:
+            async with session._lock:
+                if session.active:
+                    await session.client.run(
+                        interactions=[],
+                        audio_settings=AudioSettings(),
+                        conversation_config=ConversationConfig(),
+                        close=True
+                    )
+                await session.reset()
+    except Exception as e:
+        logger.error(f"Error during cleanup: {str(e)}")
+
+                
+

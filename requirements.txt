@@ -1,6 +1,6 @@
 # Core requirements
 chainlit
-speechmatics-flow
+speechmatics
 python-dotenv
 plotly
 pandas
@@ -23,4 +23,7 @@ langchain  # for prompts and tools
 # Database
 sqlalchemy  # for database.py
 psycopg2-binary  # for PostgreSQL support
-mysql-connector-python  # for MySQL support 
+mysql-connector-python  # for MySQL support
+
+# Additional requirements
+sounddevice  # for recording audio 

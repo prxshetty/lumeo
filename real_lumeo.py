@@ -23,17 +23,11 @@ CHUNK_SIZE = 1024  # default 256
 SEE_TRANSCRIPTS = True
 AUTH_TOKEN = os.getenv("SPEECHMATICS_AUTH_TOKEN")
 
-# SSL (Secure Sockets Layer) Configuration
-# Dummy SSL context to disable hostname and certificate verification
-# ssl_context = ssl.create_default_context()
-# ssl_context.check_hostname = True  # Keep hostname verification enabled
-# ssl_context.verify_mode = ssl.CERT_REQUIRED  # Enable certificate verification
 
 client = WebsocketClient(
     ConnectionSettings(
         url="wss://flow.api.speechmatics.com/v1/flow",
         auth_token=AUTH_TOKEN,
-        # Remove ssl_context parameter
     )
 )
 

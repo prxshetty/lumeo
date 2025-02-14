@@ -7,6 +7,8 @@ import chainlit as cl
 import pyaudio
 from uuid import uuid4
 import wave
+import json
+from tools import tools
 
 from speechmatics_flow.client import WebsocketClient
 from speechmatics_flow.models import (
@@ -15,7 +17,9 @@ from speechmatics_flow.models import (
     AudioSettings,
     ConversationConfig,
     ServerMessageType,
+    ClientMessageType,
 )
+from speechmatics_flow.tool_function_param import ToolFunctionParam
 
 import os
 from dotenv import load_dotenv
@@ -27,6 +31,9 @@ AUTH_TOKEN = os.getenv("SPEECHMATICS_AUTH_TOKEN")
 BUFFER_SIZE = 2400
 SAMPLE_RATE = 16000
 CHANNELS = 1
+
+# Add websocket lock
+websocket_lock = asyncio.Lock()
 
 async def message_handler(msg: dict):
     if isinstance(msg, dict):
@@ -106,7 +113,57 @@ async def binary_msg_handler(msg: bytes):
     
     await audio_buffer.add_chunk(msg, cl.context.emitter, track_id)
 
+async def tool_handler(msg: dict):
+    """Handle tool invocations from Flow"""
+    print(f"Tool invocation received: {msg}")
+    
+    function_data = msg.get("function", {})
+    tool_name = function_data.get("name")
+    tool_params = function_data.get("arguments", {})
+    
+    try:
+        tool_tuple = next((tool for tool in tools if tool[0]["name"] == tool_name), None)
+        
+        if tool_tuple:
+            tool_func = tool_tuple[1]
+            result = await tool_func(**tool_params) if asyncio.iscoroutinefunction(tool_func) else tool_func(**tool_params)
+            
+            response_message = {
+                "message": ClientMessageType.ToolResult,
+                "id": msg["id"],
+                "status": "ok",
+                "content": f"Successfully executed {tool_name}: {result}"
+            }
+        else:
+            response_message = {
+                "message": ClientMessageType.ToolResult,
+                "id": msg["id"],
+                "status": "failed",
+                "content": f"Tool {tool_name} not found"
+            }
+            
+    except Exception as e:
+        print(f"Error executing {tool_name}: {str(e)}")  
+        response_message = {
+            "message": ClientMessageType.ToolResult,
+            "id": msg["id"],
+            "status": "failed",
+            "content": f"Error executing {tool_name}: {str(e)}"
+        }
+    
+    client = cl.user_session.get("client")
+    if client and client.websocket:
+        await client.websocket.send(json.dumps(response_message))
+
 async def setup_client():
+    tool_configs = []
+    
+    for tool_def, _ in tools:
+        tool_configs.append(ToolFunctionParam(
+            type="function",
+            function=tool_def
+        ))
+
     client = WebsocketClient(
         ConnectionSettings(
             url="wss://flow.api.speechmatics.com/v1/flow",
@@ -118,7 +175,9 @@ async def setup_client():
     client.add_event_handler(ServerMessageType.AddTranscript, message_handler)
     client.add_event_handler(ServerMessageType.ResponseCompleted, message_handler)
     client.add_event_handler(ServerMessageType.ResponseInterrupted, message_handler)
+    client.add_event_handler(ServerMessageType.ToolInvoke, tool_handler)
     
+    cl.user_session.set("tool_configs", tool_configs)  
     return client
 
 async def async_generator(queue):
@@ -164,7 +223,7 @@ async def start():
     client = await setup_client()
     cl.user_session.set("client", client)
     
-    await cl.Message("Welcome to Lumeo! Press the microphone button to start speaking.").send()
+    await cl.Message("Welcome to Lumeo! Press the microphone button to start speaking. I can help you with various tasks including checking stock prices, creating charts, searching the internet, and more.").send()
 
 @cl.on_audio_start
 async def on_audio_start():
@@ -186,11 +245,12 @@ async def on_audio_start():
             conversation_config=ConversationConfig(
                 template_id="flow-service-assistant-humphrey",
                 template_variables={
-                    "persona": "Your name is Lumeo...",
+                    "persona": "Your name is Lumeo. You are an AI assistant that can help with various tasks including checking stock prices, creating charts, searching the internet, and generating images.",
                     "style": "Your tone makes people feel at ease and comfortable.",
-                    "context": "You are having a conversation. You want to please and assist the person you are speaking with."
+                    "context": "You are having a conversation. You want to please and assist the person you are speaking with. You have access to various tools that you can use to help them."
                 },
             ),
+            tools=cl.user_session.get("tool_configs", [])  
         )
     )
     cl.user_session.set("client_task", task)

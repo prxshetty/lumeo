@@ -9,6 +9,8 @@ from uuid import uuid4
 import wave
 import json
 from tools import tools
+from utils.common import logger
+import time
 
 from speechmatics_flow.client import WebsocketClient
 from speechmatics_flow.models import (
@@ -25,20 +27,45 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-CHUNK_SIZE = 800  
+CHUNK_SIZE = 1024
 SEE_TRANSCRIPTS = True
 AUTH_TOKEN = os.getenv("SPEECHMATICS_AUTH_TOKEN")
-BUFFER_SIZE = 2400
+BUFFER_SIZE = 3200
 SAMPLE_RATE = 16000
 CHANNELS = 1
 
-# Add websocket lock
 websocket_lock = asyncio.Lock()
+audio_buffer = io.BytesIO()
+p = pyaudio.PyAudio()
+stream = p.open(
+    format=pyaudio.paInt16,
+    channels=CHANNELS,
+    rate=SAMPLE_RATE,
+    output=True
+)
+
+async def audio_playback():
+    """Continuous audio playback from buffer"""
+    while True:
+        audio_to_play = audio_buffer.getvalue()
+        if audio_to_play:
+            try:
+                chunk_size = 4096
+                for i in range(0, len(audio_to_play), chunk_size):
+                    stream.write(audio_to_play[i:i+chunk_size])
+                audio_buffer.seek(0)
+                audio_buffer.truncate(0)
+            except Exception as e:
+                logger.error(f"Audio playback error: {str(e)}")
+        await asyncio.sleep(0.01)
 
 async def message_handler(msg: dict):
     if isinstance(msg, dict):
         message_type = msg.get("message", "")
-        if message_type == "AddTranscript":
+        if message_type == "ConversationStarted":
+            cl.user_session.set("audio_start_time", time.time())
+            
+        elif message_type == "AddTranscript":
             transcript = msg.get("metadata", {}).get("transcript", "")
             if transcript.strip():
                 stream = cl.user_session.get("transcript_stream")
@@ -59,80 +86,57 @@ async def message_handler(msg: dict):
             if content := msg.get("content", ""):
                 if stream := cl.user_session.get("transcript_stream"):
                     await stream.update()
-                    cl.user_session.remove("transcript_stream")
+                    if cl.user_session.get("transcript_stream"):
+                        cl.user_session.delete("transcript_stream")
                 
                 await cl.Message(
                     author="Lumeo",
                     content=f"[Interrupted] {content}"
                 ).send()
 
-class AudioBuffer:
-    def __init__(self, buffer_size):
-        self.buffer = bytearray()
-        self.buffer_size = buffer_size
-        self.min_buffer_size = buffer_size * 3
-        self.sent_initial = False
-
-    async def add_chunk(self, chunk: bytes, emitter, track_id):
-        self.buffer.extend(chunk)        
-        if len(self.buffer) >= self.min_buffer_size:
-            while len(self.buffer) >= self.buffer_size:
-                output_chunk = bytes(self.buffer[:self.buffer_size])
-                self.buffer = self.buffer[self.buffer_size:]
-                
-                await emitter.send_audio_chunk(
-                    cl.OutputAudioChunk(
-                        mimeType="pcm16",
-                        data=output_chunk,
-                        track=track_id,
-                        sample_rate=SAMPLE_RATE,
-                        channels=CHANNELS
-                    )
-                )
-
-    async def flush(self, emitter, track_id):
-        if self.buffer:
-            await emitter.send_audio_chunk(
-                cl.OutputAudioChunk(
-                    mimeType="pcm16",
-                    data=bytes(self.buffer),
-                    track=track_id,
-                    sample_rate=SAMPLE_RATE,
-                    channels=CHANNELS
-                )
-            )
-        self.buffer = bytearray()
-
 async def binary_msg_handler(msg: bytes):
-    track_id = cl.user_session.get("track_id")
-    
-    audio_buffer = cl.user_session.get("audio_buffer")
-    if audio_buffer is None:
-        audio_buffer = AudioBuffer(BUFFER_SIZE)
-        cl.user_session.set("audio_buffer", audio_buffer)
-    
-    await audio_buffer.add_chunk(msg, cl.context.emitter, track_id)
+    """Handle incoming audio from Speechmatics"""
+    if isinstance(msg, (bytes, bytearray)):
+        audio_buffer.write(msg)
 
 async def tool_handler(msg: dict):
     """Handle tool invocations from Flow"""
-    print(f"Tool invocation received: {msg}")
+    logger.info(f"Tool invocation received: {json.dumps(msg, indent=2)}")
     
     function_data = msg.get("function", {})
     tool_name = function_data.get("name")
     tool_params = function_data.get("arguments", {})
     
     try:
+        logger.info(f"🛠️ Executing tool: {tool_name} with params: {tool_params}")
         tool_tuple = next((tool for tool in tools if tool[0]["name"] == tool_name), None)
         
         if tool_tuple:
             tool_func = tool_tuple[1]
+            
+            # Special handling for chart generation from stock data
+            if tool_name == "draw_plotly_chart":
+                allowed_params = ["message", "plotly_json_fig"]
+                tool_params = {k: v for k, v in tool_params.items() if k in allowed_params}
+            
             result = await tool_func(**tool_params) if asyncio.iscoroutinefunction(tool_func) else tool_func(**tool_params)
             
+            # Store chart data from stock query
+            if tool_name == "query_stock_price" and isinstance(result, dict):
+                chart_data = result.get("chart_data")
+                if chart_data and isinstance(chart_data, dict):
+                    cl.user_session.set("chart_data", chart_data)
+            
+            if isinstance(result, dict):
+                response_content = json.dumps(result)
+            else:
+                response_content = str(result)
+                
             response_message = {
                 "message": ClientMessageType.ToolResult,
                 "id": msg["id"],
                 "status": "ok",
-                "content": f"Successfully executed {tool_name}: {result}"
+                "content": response_content
             }
         else:
             response_message = {
@@ -143,12 +147,13 @@ async def tool_handler(msg: dict):
             }
             
     except Exception as e:
-        print(f"Error executing {tool_name}: {str(e)}")  
+        error_msg = str(e)
+        print(f"Error executing {tool_name}: {error_msg}")
         response_message = {
             "message": ClientMessageType.ToolResult,
             "id": msg["id"],
             "status": "failed",
-            "content": f"Error executing {tool_name}: {str(e)}"
+            "content": f"Error executing {tool_name}: {error_msg}"
         }
     
     client = cl.user_session.get("client")
@@ -156,34 +161,39 @@ async def tool_handler(msg: dict):
         await client.websocket.send(json.dumps(response_message))
 
 async def setup_client():
-    tool_configs = []
+    """Configure Speechmatics client with tools"""
+    tool_configs = [ToolFunctionParam(type="function", function=tool[0]) 
+                   for tool in tools]
     
-    for tool_def, _ in tools:
-        tool_configs.append(ToolFunctionParam(
-            type="function",
-            function=tool_def
-        ))
-
     client = WebsocketClient(
         ConnectionSettings(
             url="wss://flow.api.speechmatics.com/v1/flow",
             auth_token=AUTH_TOKEN,
         )
-    )
-    
+    )    
     client.add_event_handler(ServerMessageType.AddAudio, binary_msg_handler)
     client.add_event_handler(ServerMessageType.AddTranscript, message_handler)
     client.add_event_handler(ServerMessageType.ResponseCompleted, message_handler)
-    client.add_event_handler(ServerMessageType.ResponseInterrupted, message_handler)
     client.add_event_handler(ServerMessageType.ToolInvoke, tool_handler)
-    
-    cl.user_session.set("tool_configs", tool_configs)  
+
     return client
 
-async def async_generator(queue):
+@cl.on_chat_start
+async def start():
+    """Initialize chat session"""
+    client = await setup_client()
+    cl.user_session.set("client", client)
+    cl.user_session.set("audio_chunks", asyncio.Queue())  
+    
+    asyncio.create_task(audio_playback())
+    
+    await cl.Message("Welcome to Lumeo! Press the microphone to start.").send()
+
+async def audio_generator():
+    """Async generator for audio chunks"""
     while True:
-        chunk = await queue.get()
-        if chunk is None: 
+        chunk = await cl.user_session.get("audio_chunks").get()
+        if chunk is None:
             break
         yield chunk
 
@@ -214,73 +224,48 @@ class AsyncGeneratorIO:
             self.buffer = self.buffer[size:]
             return result
 
-@cl.on_chat_start
-async def start():
-    """Initialize the chat session"""
-    cl.user_session.set("track_id", str(uuid4()))
-    cl.user_session.set("audio_chunks", asyncio.Queue())
-    
-    client = await setup_client()
-    cl.user_session.set("client", client)
-    
-    await cl.Message("Welcome to Lumeo! Press the microphone button to start speaking. I can help you with various tasks including checking stock prices, creating charts, searching the internet, and more.").send()
-
 @cl.on_audio_start
 async def on_audio_start():
-    """Handle start of audio input"""
+    """Start Speechmatics session"""
     client = cl.user_session.get("client")
     if not client:
         return False
-        
-    audio_queue = cl.user_session.get("audio_chunks")
-    generator = async_generator(audio_queue)
-    audio_stream = AsyncGeneratorIO(generator)
-    
-    task = asyncio.create_task(
-        client.run(
-            interactions=[Interaction(
-                stream=audio_stream 
-            )],
-            audio_settings=AudioSettings(),
-            conversation_config=ConversationConfig(
-                template_id="flow-service-assistant-humphrey",
-                template_variables={
-                    "persona": "Your name is Lumeo. You are an AI assistant that can help with various tasks including checking stock prices, creating charts, searching the internet, and generating images.",
-                    "style": "Your tone makes people feel at ease and comfortable.",
-                    "context": "You are having a conversation. You want to please and assist the person you are speaking with. You have access to various tools that you can use to help them."
-                },
-            ),
-            tools=cl.user_session.get("tool_configs", [])  
-        )
-    )
-    cl.user_session.set("client_task", task)
+    audio_stream = AsyncGeneratorIO(audio_generator())
+    asyncio.create_task(client.run(
+        interactions=[Interaction(audio_stream)],  
+        audio_settings=AudioSettings(
+            encoding="pcm_s16le",
+            sample_rate=SAMPLE_RATE,
+            chunk_size=CHUNK_SIZE
+        ),
+        conversation_config=ConversationConfig(
+            template_id="flow-service-assistant-humphrey",
+            template_variables={
+                "persona": "Your name is Lumeo, a voice-interactive AI assistant",
+                "style": "Be Friendly and Helpful. You are a helpful assistant that can help with a variety of tasks.",
+                "context": "Provide concise answers using available tools"
+            }
+        ),
+        tools=[ToolFunctionParam(type="function", function=tool[0]) 
+              for tool in tools]
+    ))
     return True
 
 @cl.on_audio_chunk
 async def on_audio_chunk(chunk: cl.InputAudioChunk):
-    """Handle incoming audio chunks"""
-    audio_queue = cl.user_session.get("audio_chunks")
-    if audio_queue:
-        await audio_queue.put(chunk.data)
+    """Forward audio to Speechmatics"""
+    await cl.user_session.get("audio_chunks").put(chunk.data)
 
 @cl.on_audio_end
 async def on_audio_end():
     """Handle end of audio input"""
-    audio_queue = cl.user_session.get("audio_chunks")
-    if audio_queue:
-        await audio_queue.put(None)  
+    await cl.user_session.get("audio_chunks").put(None)
 
 @cl.on_stop
 async def on_stop():
-    """Cleanup when the chat ends"""
-    client_task = cl.user_session.get("client_task")
-    if client_task:
-        client_task.cancel()
-        try:
-            await client_task
-        except asyncio.CancelledError:
-            pass
-    audio_buffer = cl.user_session.get("audio_buffer")
-    if audio_buffer:
-        track_id = cl.user_session.get("track_id")
-        await audio_buffer.flush(cl.context.emitter, track_id)
+    """Cleanup resources"""
+    stream.close()
+    p.terminate()
+    client = cl.user_session.get("client")
+    if client:
+        await client.close()

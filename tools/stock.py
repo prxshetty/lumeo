@@ -58,6 +58,23 @@ async def query_stock_price_handler(symbol: str, period: str) -> Dict[str, Any]:
         
         info = stock.info
         
+        current_price = float(prices[-1])
+        
+        chart_data = json.dumps({
+            "data": [{
+                "type": "scatter",
+                "mode": "lines+markers",
+                "x": dates,
+                "y": [float(price) for price in prices],  
+                "name": f"{symbol} Stock Price"
+            }],
+            "layout": {
+                "title": f"{symbol} Stock Prices - Last {period}",
+                "xaxis": {"title": "Date"},
+                "yaxis": {"title": "Price (USD)"}
+            }
+        })
+        
         response = {
             "symbol": symbol,
             "company": info.get("longName", symbol),
@@ -70,12 +87,7 @@ async def query_stock_price_handler(symbol: str, period: str) -> Dict[str, Any]:
             "current_price": float(prices[-1]),
             "price_change": float(prices[-1] - prices[0]),
             "price_change_percent": float((prices[-1] - prices[0]) / prices[0] * 100),
-            "chart_data": {
-                "x_data": ",".join(dates),
-                "y_data": ",".join([str(float(price)) for price in prices]),
-                "x_label": "Date",
-                "y_label": f"Price ({info.get('currency', 'USD')})"
-            }
+            "chart_data": chart_data  
         }
         
         logger.info(f"💸 Stock data retrieved successfully for symbol: {symbol}")

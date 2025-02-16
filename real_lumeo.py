@@ -50,13 +50,11 @@ async def audio_playback():
         audio_to_play = audio_buffer.getvalue()
         if audio_to_play:
             try:
-                chunk_size = 4096
-                for i in range(0, len(audio_to_play), chunk_size):
-                    stream.write(audio_to_play[i:i+chunk_size])
+                stream.write(audio_to_play)
                 audio_buffer.seek(0)
                 audio_buffer.truncate(0)
             except Exception as e:
-                logger.error(f"Audio playback error: {str(e)}")
+                logger.error(f"Playback error: {str(e)}")
         await asyncio.sleep(0.01)
 
 async def message_handler(msg: dict):
@@ -95,9 +93,18 @@ async def message_handler(msg: dict):
                 ).send()
 
 async def binary_msg_handler(msg: bytes):
-    """Handle incoming audio from Speechmatics"""
+    """Handle outgoing audio - write to buffer and send AudioReceived"""
     if isinstance(msg, (bytes, bytearray)):
-        audio_buffer.write(msg)
+        # Write to playback buffer
+        audio_buffer.write(msg)        
+        client = cl.user_session.get("client")
+        if client and client.websocket:
+            await client.websocket.send(json.dumps({
+                "message": "AudioReceived",
+                "seq_no": cl.user_session.get("seq_no", 0),
+                "buffering": 0.02
+            }))
+            cl.user_session.set("seq_no", cl.user_session.get("seq_no", 0) + 1)
 
 async def tool_handler(msg: dict):
     """Handle tool invocations from Flow"""
@@ -114,7 +121,7 @@ async def tool_handler(msg: dict):
         if tool_tuple:
             tool_func = tool_tuple[1]
             
-            # Special handling for chart generation from stock data
+            # Special handling for chart generation from stock data ( TODO : additional library tools can be added here )
             if tool_name == "draw_plotly_chart":
                 allowed_params = ["message", "plotly_json_fig"]
                 tool_params = {k: v for k, v in tool_params.items() if k in allowed_params}
@@ -181,6 +188,7 @@ async def setup_client():
 @cl.on_chat_start
 async def start():
     """Initialize chat session"""
+    cl.user_session.set("track_id", str(uuid4()))
     client = await setup_client()
     cl.user_session.set("client", client)
     cl.user_session.set("audio_chunks", asyncio.Queue())  
@@ -253,17 +261,18 @@ async def on_audio_start():
 
 @cl.on_audio_chunk
 async def on_audio_chunk(chunk: cl.InputAudioChunk):
-    """Forward audio to Speechmatics"""
+    """Handle incoming audio - send directly to Speechmatics only"""
+    # Send raw audio without processing or playback(track id can be used here)
     await cl.user_session.get("audio_chunks").put(chunk.data)
 
 @cl.on_audio_end
 async def on_audio_end():
-    """Handle end of audio input"""
+    """Handles end of user audio input"""
     await cl.user_session.get("audio_chunks").put(None)
 
 @cl.on_stop
 async def on_stop():
-    """Cleanup resources"""
+    """Cleanup for speechmatics client, pyaudio instance and stream"""
     stream.close()
     p.terminate()
     client = cl.user_session.get("client")

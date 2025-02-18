@@ -123,17 +123,29 @@ async def tool_handler(msg: dict):
             
             # Special handling for chart generation from stock data ( TODO : additional library tools can be added here )
             if tool_name == "draw_plotly_chart":
-                allowed_params = ["message", "plotly_json_fig"]
-                tool_params = {k: v for k, v in tool_params.items() if k in allowed_params}
+                # Retrieve stored chart data from user session
+                chart_data = cl.user_session.get("chart_data")
+                logger.info(f"📊 Retrieved chart data from session: {bool(chart_data)}")
+                
+                if chart_data:
+                    # Add chart data to tool parameters
+                    tool_params["plotly_json_fig"] = chart_data
+                    logger.info("✅ Added chart data to tool parameters")
+                else:
+                    logger.error("❌ No chart data found in session")
+                    return {"error": "No chart data available. Please query stock data first."}
             
             result = await tool_func(**tool_params) if asyncio.iscoroutinefunction(tool_func) else tool_func(**tool_params)
             
             # Store chart data from stock query
             if tool_name == "query_stock_price" and isinstance(result, dict):
                 chart_data = result.get("chart_data")
-                if chart_data and isinstance(chart_data, dict):
+                if chart_data:
+                    logger.info("💾 Storing chart data in session")
                     cl.user_session.set("chart_data", chart_data)
+                    logger.info("✅ Chart data stored successfully")
             
+            # Format response for Flow
             if isinstance(result, dict):
                 response_content = json.dumps(result)
             else:
@@ -145,27 +157,32 @@ async def tool_handler(msg: dict):
                 "status": "ok",
                 "content": response_content
             }
-        else:
-            response_message = {
-                "message": ClientMessageType.ToolResult,
-                "id": msg["id"],
-                "status": "failed",
-                "content": f"Tool {tool_name} not found"
-            }
+            
+            # Send response to Flow
+            client = cl.user_session.get("client")
+            if client and client.websocket:
+                await client.websocket.send(json.dumps(response_message))
+                logger.info("✅ Sent tool result to Flow")
+            
+            return result
             
     except Exception as e:
-        error_msg = str(e)
-        print(f"Error executing {tool_name}: {error_msg}")
+        error_msg = f"Error executing {tool_name}: {str(e)}"
+        logger.error(f"❌ {error_msg}")
+        
+        # Send error response to Flow
         response_message = {
             "message": ClientMessageType.ToolResult,
             "id": msg["id"],
             "status": "failed",
-            "content": f"Error executing {tool_name}: {error_msg}"
+            "content": error_msg
         }
-    
-    client = cl.user_session.get("client")
-    if client and client.websocket:
-        await client.websocket.send(json.dumps(response_message))
+        
+        client = cl.user_session.get("client")
+        if client and client.websocket:
+            await client.websocket.send(json.dumps(response_message))
+            
+        return {"error": error_msg}
 
 async def setup_client():
     """Configure Speechmatics client with tools"""

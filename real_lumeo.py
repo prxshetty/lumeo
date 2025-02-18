@@ -131,10 +131,7 @@ async def tool_handler(msg: dict):
                     # Add chart data to tool parameters
                     tool_params["plotly_json_fig"] = chart_data
                     logger.info("✅ Added chart data to tool parameters")
-                else:
-                    logger.error("❌ No chart data found in session")
-                    return {"error": "No chart data available. Please query stock data first."}
-            
+
             result = await tool_func(**tool_params) if asyncio.iscoroutinefunction(tool_func) else tool_func(**tool_params)
             
             # Store chart data from stock query

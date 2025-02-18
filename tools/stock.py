@@ -29,6 +29,9 @@ query_stock_price_def = {
 async def query_stock_price_handler(symbol: str, period: str) -> Dict[str, Any]:
     """Queries stock price information for a given symbol and time period."""
     try:
+        cl.user_session.set("last_symbol", symbol)
+        cl.user_session.set("last_period", period)
+        
         logger.info(f"📈 Fetching stock price for symbol: {symbol}, period: {period}")
         
         symbol = symbol.strip().upper()
@@ -36,6 +39,11 @@ async def query_stock_price_handler(symbol: str, period: str) -> Dict[str, Any]:
         valid_periods = ['1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', 'max']
         if period not in valid_periods:
             raise ValueError(f"Invalid period. Must be one of: {', '.join(valid_periods)}")
+        
+        if not symbol or not period:
+            error_msg = "Missing required parameters: symbol and period must be provided"
+            logger.error(f"❌ {error_msg}")
+            return {"error": error_msg}
         
         logger.info(f"🔍 Querying yfinance for {symbol}...")
         stock = yf.Ticker(symbol)

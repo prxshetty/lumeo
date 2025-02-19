@@ -1,5 +1,5 @@
 """Image generation tool using DALL-E."""
-
+# todos : add image storing to the same file and to store images as well
 import os
 from typing import Optional
 from openai import OpenAI

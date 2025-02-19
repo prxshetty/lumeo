@@ -1,5 +1,5 @@
 """Internet search tool using Tavily API."""
-
+# todos : proper search result display and ai read for them
 from typing import Dict, Any
 import chainlit as cl
 from utils.common import tavily_client, logger

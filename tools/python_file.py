@@ -2,7 +2,7 @@
 
 import os
 import subprocess
-
+#todos : fix the ai reading the post
 import chainlit as cl
 from langchain.prompts import PromptTemplate
 from pydantic import BaseModel, Field

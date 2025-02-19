@@ -65,7 +65,7 @@ async def draft_email_handler(to: str, context: str):
         chain_input = {"to": to, "context": context}
         email_draft = structured_llm.invoke(system_template.format(**chain_input))
         await cl.Message(
-            content=f"📧 **Draft Email**\n\n**To:** {to}\n**Subject:** {email_draft.subject}\n\n{email_draft.body}"
+            content=f"I have drafted the email for you! Please review it and let me know if you need any changes."
         ).send()
 
         return {

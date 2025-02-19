@@ -1,13 +1,12 @@
-"""Image generation tool."""
+"""Image generation tool using DALL-E."""
 
-import base64
 import os
-
+from typing import Optional
+from openai import OpenAI
 import chainlit as cl
-from langchain.prompts import PromptTemplate
 from pydantic import BaseModel, Field
-from utils.ai_models import get_image_generation_config, get_llm
-from utils.common import logger, scratch_pad_dir, together_client
+from utils.ai_models import get_llm, get_image_generation_config
+from utils.common import logger, scratch_pad_dir
 
 
 class EnhancedPrompt(BaseModel):
@@ -19,9 +18,16 @@ class EnhancedPrompt(BaseModel):
     )
 
 
+class ImageGenerationParams(BaseModel):
+    """Parameters for image generation"""
+    size: str = Field(default="1024x1024")
+    quality: str = Field(default="standard")
+    style: str = Field(default="vivid")
+
+
 generate_image_def = {
     "name": "generate_image",
-    "description": "Generates an image based on a given prompt.",
+    "description": "Generates an image based on a given prompt using DALL-E.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -29,75 +35,100 @@ generate_image_def = {
                 "type": "string",
                 "description": "The prompt to generate an image (e.g., 'A beautiful sunset over the mountains')",
             },
+            "size": {
+                "type": "string",
+                "description": "Size of the image (1024x1024, 1024x1792, or 1792x1024)",
+                "default": "1024x1024"
+            },
+            "quality": {
+                "type": "string",
+                "description": "Quality of the image (standard or hd)",
+                "default": "standard"
+            },
+            "style": {
+                "type": "string",
+                "description": "Style of the image (vivid or natural)",
+                "default": "vivid"
+            }
         },
         "required": ["prompt"],
     },
 }
 
 
-async def generate_image_handler(prompt):
-    """Generates an image based on a given prompt using the Together API."""
+async def enhance_prompt(prompt: str, llm) -> str:
+    """Enhance the image generation prompt using LLM."""
+    structured_llm = llm.with_structured_output(EnhancedPrompt)
+    system_template = """
+    Enhance the given prompt using best prompt engineering techniques for DALL-E 3.
+    Add relevant details about style, lighting, and composition while maintaining the original intent.
+
+    # Original Prompt
+    {prompt}
+
+    # Guidelines
+    1. Be specific about visual details
+    2. Include lighting and atmosphere
+    3. Specify artistic style if relevant
+    4. Maintain the core concept of the original prompt
+    """
+    
+    return structured_llm.invoke(
+        system_template.format(prompt=prompt)
+    ).content
+
+
+async def generate_image_handler(
+    prompt: str,
+    size: Optional[str] = None,
+    quality: Optional[str] = None,
+    style: Optional[str] = None
+) -> str:
+    """Generates an image based on a given prompt using DALL-E."""
     try:
-        logger.info(f"✨ Enhancing prompt: '{prompt}'")
-
-        llm = get_llm("image_prompt")
-
-        structured_llm = llm.with_structured_output(EnhancedPrompt)
-
-        system_template = """
-        Enhance the given prompt the best prompt engineering techniques such as providing context, specifying style, medium, lighting, and camera details if applicable. If the prompt requests a realistic style, the enhanced prompt should include the image extension .HEIC.
-
-        # Original Prompt
-        {prompt}
-
-        # Objective
-        **Enhance Prompt**: Add relevant details to the prompt, including context, description, specific visual elements, mood, and technical details. For realistic prompts, add '.HEIC' in the output specification.
-
-        # Example
-        "realistic photo of a person having a coffee" -> "photo of a person having a coffee in a cozy cafe, natural morning light, shot with a 50mm f/1.8 lens, 8425.HEIC"
-        """
-
-        prompt_template = PromptTemplate(
-            input_variables=["prompt"],
-            template=system_template,
-        )
-
-        chain = prompt_template | structured_llm
-        enhanced_prompt = chain.invoke({"prompt": prompt}).content
-
-        logger.info(f"🌄 Generating image based on prompt: '{enhanced_prompt}'")
-
-        # Get image generation configuration
+        logger.info(f"✨ Processing image generation request for prompt: '{prompt}'")
+        
+        # Get configurations
         img_config = get_image_generation_config()
-        response = together_client.images.generate(
-            prompt=prompt,
-            model=img_config["name"],
-            width=img_config["width"],
-            height=img_config["height"],
-            steps=img_config["steps"],
-            n=img_config["n"],
-            response_format=img_config["response_format"],
+        
+        # Use provided parameters or defaults from config
+        params = ImageGenerationParams(
+            size=size or img_config["default_size"],
+            quality=quality or img_config["default_quality"],
+            style=style or img_config["default_style"]
         )
 
-        b64_image = response.data[0].b64_json
-        image_data = base64.b64decode(b64_image)
+        # Enhance prompt
+        llm = get_llm("image_prompt")
+        enhanced_prompt = await enhance_prompt(prompt, llm)
+        logger.info(f"🌄 Enhanced prompt: '{enhanced_prompt}'")
 
-        img_path = os.path.join(scratch_pad_dir, "generated_image.jpeg")
-        with open(img_path, "wb") as f:
-            f.write(image_data)
+        # Generate image
+        client = OpenAI()
+        response = client.images.generate(
+            model=img_config["model"],
+            prompt=enhanced_prompt,
+            size=params.size,
+            quality=params.quality,
+            style=params.style,
+            n=1
+        )
 
-        logger.info(f"🖼️ Image generated and saved successfully at {img_path}")
-        image = cl.Image(path=img_path, name="Generated Image", display="inline")
+        image_url = response.data[0].url
+        image = cl.Image(url=image_url, name="Generated Image", display="inline")
+        
         await cl.Message(
-            content=f"Image generated with the prompt '{enhanced_prompt}'",
+            content=f"Image generated with the prompt: '{enhanced_prompt}'",
             elements=[image],
         ).send()
 
         return "Image successfully generated"
 
     except Exception as e:
-        logger.error(f"❌ Error generating image: {str(e)}")
-        return {"error": str(e)}
+        error_message = f"Error generating image: {str(e)}"
+        logger.error(f"❌ {error_message}")
+        await cl.Message(content=error_message, type="error").send()
+        return {"error": error_message}
 
 
 generate_image = (generate_image_def, generate_image_handler)

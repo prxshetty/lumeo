@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Scratchpad directory
-scratch_pad_dir = "../scratchpad"
+scratch_pad_dir = "./scratchpad"
 os.makedirs(scratch_pad_dir, exist_ok=True)
 
 # Initialize clients with error handling

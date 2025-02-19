@@ -116,6 +116,13 @@ async def tool_handler(msg: dict):
     
     try:
         logger.info(f"🛠️ Executing tool: {tool_name} with params: {tool_params}")
+        
+        # Add pre-execution announcements for specific tools
+        if tool_name == "open_browser":
+            await cl.Message(
+                content=f"Opening website {tool_params.get('url', '')} in your browser..."
+            ).send()
+        
         tool_tuple = next((tool for tool in tools if tool[0]["name"] == tool_name), None)
         
         if tool_tuple:
@@ -133,6 +140,17 @@ async def tool_handler(msg: dict):
                     logger.info("✅ Added chart data to tool parameters")
 
             result = await tool_func(**tool_params) if asyncio.iscoroutinefunction(tool_func) else tool_func(**tool_params)
+            
+            if tool_name == "draft_email":
+                email_draft = cl.user_session.get("email_draft")
+                if email_draft:
+                    await cl.Message(
+                        content=f"Here's your email draft:\n\n"
+                               f"**Subject:** {email_draft['subject']}\n\n"
+                               f"{email_draft['body']}",
+                        author="Email Draft"  
+                    ).send()
+                    cl.user_session.set("email_draft", None)
             
             # Store chart data from stock query
             if tool_name == "query_stock_price" and isinstance(result, dict):

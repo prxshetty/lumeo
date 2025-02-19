@@ -17,13 +17,9 @@ pyaudio   # for audio processing
 
 # API Clients
 tavily-python  # for search.py
-together  # for image generation
 langchain  # for prompts and tools
-
-# Database
-sqlalchemy  # for database.py
-psycopg2-binary  # for PostgreSQL support
-mysql-connector-python  # for MySQL support
-
 # Additional requirements
 sounddevice  # for recording audio 
+retry==0.9.2
+yfinance==0.2.37
+pandas==2.1.4 

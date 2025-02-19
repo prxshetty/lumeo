@@ -7,7 +7,6 @@ from .search import internet_search
 from .linkedin import draft_linkedin_post
 from .python_file import create_python_file, execute_python_file
 from .browser import open_browser
-from .database import execute_sql
 from .email import draft_email
 
 tools = [
@@ -19,7 +18,6 @@ tools = [
     create_python_file,
     execute_python_file,
     open_browser,
-    execute_sql,
     draft_email,
 ]
 

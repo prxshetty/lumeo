@@ -6,6 +6,10 @@ from utils.common import logger
 import pandas as pd
 import json
 import chainlit as cl
+from retry import retry
+import time
+import requests
+from functools import partial
 
 query_stock_price_def = {
     "name": "query_stock_price",
@@ -26,13 +30,19 @@ query_stock_price_def = {
     }
 }
 
-async def query_stock_price_handler(symbol: str, period: str) -> Dict[str, Any]:
+@retry(tries=3, delay=2, backoff=2, max_delay=10)
+def query_stock_price_handler(symbol: str, period: str) -> Dict[str, Any]:
     """Queries stock price information for a given symbol and time period."""
     try:
         cl.user_session.set("last_symbol", symbol)
         cl.user_session.set("last_period", period)
         
         logger.info(f"📈 Fetching stock price for symbol: {symbol}, period: {period}")
+        
+        yf_download = partial(yf.download, progress=False)
+    
+        cache_buster = int(time.time())
+        stock = yf.Ticker(symbol, session=requests.Session())
         
         symbol = symbol.strip().upper()
         
@@ -46,7 +56,6 @@ async def query_stock_price_handler(symbol: str, period: str) -> Dict[str, Any]:
             return {"error": error_msg}
         
         logger.info(f"🔍 Querying yfinance for {symbol}...")
-        stock = yf.Ticker(symbol)
         hist = stock.history(period=period)
         
         if hist.empty:

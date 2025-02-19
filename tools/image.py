@@ -7,6 +7,8 @@ import chainlit as cl
 from pydantic import BaseModel, Field
 from utils.ai_models import get_llm, get_image_generation_config
 from utils.common import logger, scratch_pad_dir
+import aiohttp
+import time
 
 
 class EnhancedPrompt(BaseModel):
@@ -121,6 +123,17 @@ async def generate_image_handler(
             content=f"Image generated with the prompt: '{enhanced_prompt}'",
             elements=[image],
         ).send()
+
+        image_dir = os.path.join(scratch_pad_dir, "images")
+        os.makedirs(image_dir, exist_ok=True)
+        img_path = os.path.join(image_dir, f"image_{int(time.time())}.png")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(image_url) as response:
+                if response.status == 200:
+                    with open(img_path, "wb") as f:
+                        f.write(await response.read())
+                    logger.info(f"💾 Image saved to {img_path}")
 
         return "Image successfully generated"
 

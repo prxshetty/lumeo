@@ -64,20 +64,24 @@ async def draft_email_handler(to: str, context: str):
 
         chain_input = {"to": to, "context": context}
         email_draft = structured_llm.invoke(system_template.format(**chain_input))
+        
+        # Store draft in user session instead of returning it
+        cl.user_session.set("email_draft", {
+            "subject": email_draft.subject,
+            "body": email_draft.body
+        })
+
         await cl.Message(
-            content=f"I have drafted the email for you! Please review it and let me know if you need any changes."
+            content=f"✅ Email draft for {to} has been successfully generated!",
         ).send()
 
-        return {
-            "subject": email_draft.subject,
-            "body": email_draft.body,
-        }
+        return {"status": "success", "message": "Email draft completed"}
 
     except Exception as e:
         error_message = f"Error drafting email: {str(e)}"
         logger.error(f"❌ {error_message}")
         await cl.Message(content=error_message, type="error").send()
-        return {"error": error_message}
+        return {"status": "error", "message": error_message}
 
 
 draft_email = (draft_email_def, draft_email_handler)

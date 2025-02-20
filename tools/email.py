@@ -33,7 +33,7 @@ draft_email_def = {
 }
 
 
-async def draft_email_handler(to: str, context: str):
+def draft_email_handler(to: str, context: str):
     """Drafts a personalized email using recipient info and context."""
     try:
         logger.info(f"📧 Drafting email to: {to}")
@@ -71,16 +71,19 @@ async def draft_email_handler(to: str, context: str):
             "body": email_draft.body
         })
 
-        await cl.Message(
-            content=f"✅ Email draft for {to} has been successfully generated!",
-        ).send()
+        # Sync message sending
+        cl.run_sync(
+            cl.Message(
+                content=f"✅ Email draft for {to} has been successfully generated!",
+            ).send()
+        )
 
         return {"status": "success", "message": "Email draft completed"}
 
     except Exception as e:
         error_message = f"Error drafting email: {str(e)}"
         logger.error(f"❌ {error_message}")
-        await cl.Message(content=error_message, type="error").send()
+        cl.run_sync(cl.Message(content=error_message, type="error").send())
         return {"status": "error", "message": error_message}
 
 

@@ -9,6 +9,7 @@ from utils.ai_models import get_llm, get_image_generation_config
 from utils.common import logger, scratch_pad_dir
 import aiohttp
 import time
+import requests
 
 
 class EnhancedPrompt(BaseModel):
@@ -58,7 +59,7 @@ generate_image_def = {
 }
 
 
-async def enhance_prompt(prompt: str, llm) -> str:
+def enhance_prompt(prompt: str, llm) -> str:
     """Enhance the image generation prompt using LLM."""
     structured_llm = llm.with_structured_output(EnhancedPrompt)
     system_template = """
@@ -80,7 +81,7 @@ async def enhance_prompt(prompt: str, llm) -> str:
     ).content
 
 
-async def generate_image_handler(
+def generate_image_handler(
     prompt: str,
     size: Optional[str] = None,
     quality: Optional[str] = None,
@@ -88,24 +89,18 @@ async def generate_image_handler(
 ) -> str:
     """Generates an image based on a given prompt using DALL-E."""
     try:
-        logger.info(f"✨ Processing image generation request for prompt: '{prompt}'")
-        
-        # Get configurations
+        logger.info(f"✨ Processing image generation request for prompt: '{prompt}'")        
         img_config = get_image_generation_config()
-        
-        # Use provided parameters or defaults from config
+    
         params = ImageGenerationParams(
             size=size or img_config["default_size"],
             quality=quality or img_config["default_quality"],
             style=style or img_config["default_style"]
         )
-
-        # Enhance prompt
+        
         llm = get_llm("image_prompt")
-        enhanced_prompt = await enhance_prompt(prompt, llm)
+        enhanced_prompt = enhance_prompt(prompt, llm)
         logger.info(f"🌄 Enhanced prompt: '{enhanced_prompt}'")
-
-        # Generate image
         client = OpenAI()
         response = client.images.generate(
             model=img_config["model"],
@@ -115,32 +110,31 @@ async def generate_image_handler(
             style=params.style,
             n=1
         )
-
         image_url = response.data[0].url
-        image = cl.Image(url=image_url, name="Generated Image", display="inline")
-        
-        await cl.Message(
-            content=f"Image generated with the prompt: '{enhanced_prompt}'",
-            elements=[image],
-        ).send()
+        image = cl.Image(url=image_url, name="Generated Image", display="inline")        
+        cl.run_sync(
+            cl.Message(
+                content=f"Image generated with the prompt: '{enhanced_prompt}'",
+                elements=[image],
+            ).send()
+        )
 
         image_dir = os.path.join(scratch_pad_dir, "images")
         os.makedirs(image_dir, exist_ok=True)
         img_path = os.path.join(image_dir, f"image_{int(time.time())}.png")
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(image_url) as response:
-                if response.status == 200:
-                    with open(img_path, "wb") as f:
-                        f.write(await response.read())
-                    logger.info(f"💾 Image saved to {img_path}")
+        response = requests.get(image_url)
+        if response.status_code == 200:
+            with open(img_path, "wb") as f:
+                f.write(response.content)
+            logger.info(f"💾 Image saved to {img_path}")
 
         return "Image successfully generated"
 
     except Exception as e:
         error_message = f"Error generating image: {str(e)}"
         logger.error(f"❌ {error_message}")
-        await cl.Message(content=error_message, type="error").send()
+        cl.run_sync(cl.Message(content=error_message, type="error").send())
         return {"error": error_message}
 
 

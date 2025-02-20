@@ -128,37 +128,10 @@ async def tool_handler(msg: dict):
         if tool_tuple:
             tool_func = tool_tuple[1]
             
-            # Special handling for chart generation from stock data ( TODO : additional library tools can be added here )
-            if tool_name == "draw_plotly_chart":
-                # Retrieve stored chart data from user session
-                chart_data = cl.user_session.get("chart_data")
-                logger.info(f"📊 Retrieved chart data from session: {bool(chart_data)}")
-                
-                if chart_data:
-                    # Add chart data to tool parameters
-                    tool_params["plotly_json_fig"] = chart_data
-                    logger.info("✅ Added chart data to tool parameters")
-
-            result = await tool_func(**tool_params) if asyncio.iscoroutinefunction(tool_func) else tool_func(**tool_params)
+            result = tool_func(**tool_params)
             
-            if tool_name == "draft_email":
-                email_draft = cl.user_session.get("email_draft")
-                if email_draft:
-                    await cl.Message(
-                        content=f"Here's your email draft:\n\n"
-                               f"**Subject:** {email_draft['subject']}\n\n"
-                               f"{email_draft['body']}",
-                        author="Email Draft"  
-                    ).send()
-                    cl.user_session.set("email_draft", None)
-            
-            # Store chart data from stock query
-            if tool_name == "query_stock_price" and isinstance(result, dict):
-                chart_data = result.get("chart_data")
-                if chart_data:
-                    logger.info("💾 Storing chart data in session")
-                    cl.user_session.set("chart_data", chart_data)
-                    logger.info("✅ Chart data stored successfully")
+            # Add brief pause to ensure UI updates flush
+            time.sleep(0.1)
             
             # Format response for Flow
             if isinstance(result, dict):
@@ -176,8 +149,9 @@ async def tool_handler(msg: dict):
             # Send response to Flow
             client = cl.user_session.get("client")
             if client and client.websocket:
-                await client.websocket.send(json.dumps(response_message))
-                logger.info("✅ Sent tool result to Flow")
+                cl.run_sync(
+                    client.websocket.send(json.dumps(response_message))
+                )
             
             return result
             

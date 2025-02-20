@@ -10,6 +10,7 @@ from retry import retry
 import time
 import requests
 from functools import partial
+import asyncio
 
 query_stock_price_def = {
     "name": "query_stock_price",
@@ -24,39 +25,49 @@ query_stock_price_def = {
             "period": {
                 "type": "string",
                 "description": "Time period for data retrieval (e.g., '1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', 'max')"
+            },
+            "reset_session": {
+                "type": "boolean",
+                "description": "Whether to reset the session data before processing"
             }
         },
         "required": ["symbol", "period"]
     }
 }
 
+def reset_stock_session():
+    """Reset all stock-related session data"""
+    session_keys = ["chart_data", "last_symbol", "last_period"]
+    for key in session_keys:
+        if cl.user_session.get(key):
+            cl.user_session.set(key, None)
+    logger.info("🔄 Reset stock session data")
+
 @retry(tries=3, delay=2, backoff=2, max_delay=10)
-def query_stock_price_handler(symbol: str, period: str) -> Dict[str, Any]:
+def query_stock_price_handler(symbol: str, period: str, reset_session: bool = False) -> Dict[str, Any]:
     """Queries stock price information for a given symbol and time period."""
     try:
+        # Reset session if requested or if new stock/period
+        if reset_session or (symbol != cl.user_session.get("last_symbol")) or (period != cl.user_session.get("last_period")):
+            reset_stock_session()
+        
+        symbol = symbol.strip().upper()
         cl.user_session.set("last_symbol", symbol)
         cl.user_session.set("last_period", period)
         
         logger.info(f"📈 Fetching stock price for symbol: {symbol}, period: {period}")
         
-        yf_download = partial(yf.download, progress=False)
-    
-        cache_buster = int(time.time())
-        stock = yf.Ticker(symbol, session=requests.Session())
+        # Create async context for yfinance
+        loop = asyncio.get_event_loop()
         
-        symbol = symbol.strip().upper()
-        
-        valid_periods = ['1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', 'max']
-        if period not in valid_periods:
-            raise ValueError(f"Invalid period. Must be one of: {', '.join(valid_periods)}")
-        
-        if not symbol or not period:
-            error_msg = "Missing required parameters: symbol and period must be provided"
-            logger.error(f"❌ {error_msg}")
-            return {"error": error_msg}
-        
-        logger.info(f"🔍 Querying yfinance for {symbol}...")
-        hist = stock.history(period=period)
+        # Run yfinance operations in a thread pool
+        def yf_operations():
+            stock = yf.Ticker(symbol, session=requests.Session())
+            hist = stock.history(period=period)
+            info = stock.info
+            return hist, info
+            
+        hist, info = yf_operations()
         
         if hist.empty:
             logger.warning(f"⚠️ No data found for symbol: {symbol}")
@@ -67,7 +78,6 @@ def query_stock_price_handler(symbol: str, period: str) -> Dict[str, Any]:
         logger.info(f"📊 Got {len(hist)} data points for {symbol}")
         dates = hist.index.strftime('%Y-%m-%d').tolist()
         prices = hist['Close'].tolist()
-        info = stock.info
         
         # Create optimized Plotly figure structure
         chart_data = {
@@ -96,6 +106,9 @@ def query_stock_price_handler(symbol: str, period: str) -> Dict[str, Any]:
         
         json_data = json.dumps(chart_data, separators=(',', ':'))
         logger.info(f"📈 Generated chart data with {len(dates)} points")
+        
+        # Store chart data in session
+        cl.user_session.set("chart_data", json_data)
         
         result = {
             "symbol": symbol,

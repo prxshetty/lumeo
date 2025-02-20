@@ -95,7 +95,6 @@ async def message_handler(msg: dict):
 async def binary_msg_handler(msg: bytes):
     """Handle outgoing audio - write to buffer and send AudioReceived"""
     if isinstance(msg, (bytes, bytearray)):
-        # Write to playback buffer
         audio_buffer.write(msg)        
         client = cl.user_session.get("client")
         if client and client.websocket:
@@ -117,7 +116,7 @@ async def tool_handler(msg: dict):
     try:
         logger.info(f"🛠️ Executing tool: {tool_name} with params: {tool_params}")
         
-        # Add pre-execution announcements for specific tools
+        # Added pre-execution announcements for specific tools
         if tool_name == "open_browser":
             await cl.Message(
                 content=f"Opening website {tool_params.get('url', '')} in your browser..."
@@ -128,12 +127,8 @@ async def tool_handler(msg: dict):
         if tool_tuple:
             tool_func = tool_tuple[1]
             
-            result = tool_func(**tool_params)
-            
-            # Add brief pause to ensure UI updates flush
-            time.sleep(0.1)
-            
-            # Format response for Flow
+            result = tool_func(**tool_params)            
+            time.sleep(0.1)            
             if isinstance(result, dict):
                 response_content = json.dumps(result)
             else:
@@ -144,9 +139,7 @@ async def tool_handler(msg: dict):
                 "id": msg["id"],
                 "status": "ok",
                 "content": response_content
-            }
-            
-            # Send response to Flow
+            }            
             client = cl.user_session.get("client")
             if client and client.websocket:
                 cl.run_sync(
@@ -157,9 +150,7 @@ async def tool_handler(msg: dict):
             
     except Exception as e:
         error_msg = f"Error executing {tool_name}: {str(e)}"
-        logger.error(f"❌ {error_msg}")
-        
-        # Send error response to Flow
+        logger.error(f"❌ {error_msg}")        
         response_message = {
             "message": ClientMessageType.ToolResult,
             "id": msg["id"],
@@ -268,7 +259,6 @@ async def on_audio_start():
 @cl.on_audio_chunk
 async def on_audio_chunk(chunk: cl.InputAudioChunk):
     """Handle incoming audio - send directly to Speechmatics only"""
-    # Send raw audio without processing or playback(track id can be used here)
     await cl.user_session.get("audio_chunks").put(chunk.data)
 
 @cl.on_audio_end

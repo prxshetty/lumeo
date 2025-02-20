@@ -50,22 +50,17 @@ def draw_plotly_chart_handler(message: str, plotly_json_fig: str = None, symbol:
     try:
         logger.info(f"🎨 Drawing Plotly chart with message: {message}")
         
-        # Show status message first
         cl.run_sync(
             cl.Message(content=f"⏳ Generating chart for {symbol or 'selected stock'}...").send()
         )
 
-        # Convert reset_session to boolean if it's a string
         if isinstance(reset_session, str):
             reset_session = reset_session.lower() == 'true'
         
-        # Only reset if explicitly requested or if new symbol/period
         if reset_session or (symbol and symbol != cl.user_session.get("last_symbol")) or (period and period != cl.user_session.get("last_period")):
             reset_stock_session()        
         symbol = symbol or cl.user_session.get("last_symbol")
-        period = period or cl.user_session.get("last_period")
-        
-        # If no chart data provided or stored
+        period = period or cl.user_session.get("last_period")        
         if not plotly_json_fig:
             stored_chart_data = cl.user_session.get("chart_data")
             if stored_chart_data and not reset_session:
@@ -99,8 +94,6 @@ def draw_plotly_chart_handler(message: str, plotly_json_fig: str = None, symbol:
                         cl.Message(content=f"Error: {error_msg}").send()
                     )
                     return {"error": error_msg}
-
-        # Render the chart
         try:
             fig = plotly.io.from_json(plotly_json_fig)
             cl.run_sync(

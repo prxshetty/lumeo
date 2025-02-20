@@ -33,7 +33,6 @@ def get_llm(task: str = "default") -> ChatGroq:
         )
     except Exception as e:
         logger.error(f"❌ Error initializing LLM for task '{task}': {str(e)}")
-        # Fallback to default configuration
         return ChatGroq(
             model="llama-3.3-70b-versatile",
             api_key=os.environ.get("GROQ_API_KEY"),
@@ -49,7 +48,6 @@ def get_image_generation_config() -> Dict[str, Any]:
         return config["image_generation"]
     except Exception as e:
         logger.error(f"❌ Error loading image generation config: {str(e)}")
-        # Fallback to default configuration
         return {
             "provider": "openai",
             "model": "dall-e-3",

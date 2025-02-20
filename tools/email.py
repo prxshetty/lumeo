@@ -63,15 +63,11 @@ def draft_email_handler(to: str, context: str):
         """
 
         chain_input = {"to": to, "context": context}
-        email_draft = structured_llm.invoke(system_template.format(**chain_input))
-        
-        # Store draft in user session instead of returning it
+        email_draft = structured_llm.invoke(system_template.format(**chain_input))        
         cl.user_session.set("email_draft", {
             "subject": email_draft.subject,
             "body": email_draft.body
         })
-
-        # Sync message sending
         cl.run_sync(
             cl.Message(
                 content=f"✅ Email draft for {to} has been successfully generated!",

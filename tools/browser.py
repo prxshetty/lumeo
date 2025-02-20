@@ -1,5 +1,5 @@
 """Browser interaction tools."""
-
+# TODOs : add other platforms
 import webbrowser
 import AppKit
 import chainlit as cl
@@ -8,7 +8,7 @@ import sys
 
 def get_default_browser():
     try:
-        # Only try to detect browser on macOS
+        # Only try to detect browser on macOS ( might need to add other platforms)
         if sys.platform != 'darwin':
             return 'default'
             

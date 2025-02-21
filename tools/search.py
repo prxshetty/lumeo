@@ -23,41 +23,60 @@ internet_search_def = {
     }
 }
 
-async def internet_search_handler(query: str, search_depth: str) -> Dict[str, Any]:
+def internet_search_handler(query: str, search_depth: str) -> Dict[str, Any]:
     """Executes an internet search using the Tavily API and returns the result."""
     try:
         logger.info(f"🕵 Performing internet search for query: '{query}'")
-        response = tavily_client.search(query)
+        response = tavily_client.search(
+            query,
+            search_depth=search_depth,
+            include_images=True
+        )
 
         results = response.get("results", [])
         if not results:
-            await cl.Message(content=f"No results found for '{query}'.").send()
+            cl.run_sync(cl.Message(content=f"🔍 No results found for '{query}'").send())
             return None
 
-        # Send summary first
-        summary = response.get("answer", "Here are the top search results:")
-        await cl.Message(content=f"**{summary}**").send()
-
-        # Send results as separate messages with better formatting
-        for i, result in enumerate(results[:5]):  # Limit to top 5 results
-            content = f"### {i+1}. [{result['title']}]({result['url']})\n{result['content'][:250]}..."
-            await cl.Message(
-                content=content,
-                elements=[
-                    cl.Text(
-                        name=result['title'],
-                        content=result['content'],
-                        display="side"
+        for i, result in enumerate(results[:4]):  
+            content = f"""
+{i+1}. {result['title']}
+{result['url']}
+{result['content'][:150].strip()}{'...' if len(result['content']) > 150 else ''}
+            """.strip()
+            
+            images = result.get('image_urls', [])
+            elements = []            
+            elements.append(
+                cl.Text(
+                    name=result['title'],
+                    content=result['content'],
+                    display="side"
+                )
+            )            
+            if images:
+                for img_url in images[:2]:  
+                    elements.append(
+                        cl.Image(
+                            name=f"Search Result Image",
+                            url=img_url,
+                            display="inline"
+                        )
                     )
-                ]
-            ).send()
+            
+            cl.run_sync(
+                cl.Message(
+                    content=content,
+                    elements=elements
+                ).send()
+            )
 
         logger.info(f"📏 Search results for '{query}' retrieved successfully.")
         return response["results"]
     except Exception as e:
         error_msg = f"Search error: {str(e)}"
         logger.error(f"❌ {error_msg}")
-        await cl.Message(content=error_msg).send()
+        cl.run_sync(cl.Message(content=error_msg).send())
         return {"error": error_msg}
 
 internet_search = (internet_search_def, internet_search_handler)

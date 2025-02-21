@@ -1,7 +1,7 @@
 """Image generation tool using DALL-E."""
 # todos : add image storing to the same file and to store images as well
 import os
-from typing import Optional
+from typing import Optional, Dict, Any
 from openai import OpenAI
 import chainlit as cl
 from pydantic import BaseModel, Field
@@ -81,12 +81,12 @@ def enhance_prompt(prompt: str, llm) -> str:
     ).content
 
 
-def generate_image_handler(
+async def generate_image_handler(
     prompt: str,
-    size: Optional[str] = None,
-    quality: Optional[str] = None,
-    style: Optional[str] = None
-) -> str:
+    size: str,
+    quality: str,
+    style: str
+) -> Dict[str, Any]:
     """Generates an image based on a given prompt using DALL-E."""
     try:
         logger.info(f"✨ Processing image generation request for prompt: '{prompt}'")        
@@ -114,8 +114,8 @@ def generate_image_handler(
         image = cl.Image(url=image_url, name="Generated Image", display="inline")        
         cl.run_sync(
             cl.Message(
-                content=f"Image generated with the prompt: '{enhanced_prompt}'",
-                elements=[image],
+                content="",  
+                elements=[cl.Image(name=image_url, url=image_url, display="inline")]
             ).send()
         )
 
@@ -129,13 +129,13 @@ def generate_image_handler(
                 f.write(response.content)
             logger.info(f"💾 Image saved to {img_path}")
 
-        return "Image successfully generated"
+        return {"image_url": image_url}
 
     except Exception as e:
-        error_message = f"Error generating image: {str(e)}"
-        logger.error(f"❌ {error_message}")
-        cl.run_sync(cl.Message(content=error_message, type="error").send())
-        return {"error": error_message}
+        error_msg = f"🖼️ Image Error: {str(e)}"
+        logger.error(f"❌ {error_msg}")
+        cl.run_sync(cl.Message(content=error_msg).send())
+        return {"error": error_msg}
 
 
 generate_image = (generate_image_def, generate_image_handler)

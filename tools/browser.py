@@ -1,5 +1,5 @@
 """Browser interaction tools."""
-# TODOs : add other platforms
+# TODOs : add other platforms ( Windows, Linux, etc.)
 import webbrowser
 import AppKit
 import chainlit as cl
@@ -8,7 +8,6 @@ import sys
 
 def get_default_browser():
     try:
-        # Only try to detect browser on macOS ( might need to add other platforms)
         if sys.platform != 'darwin':
             return 'default'
             
@@ -53,12 +52,22 @@ def open_browser_handler(url: str):
         else:
             webbrowser.get().open(url)
             
+        cl.run_sync(
+            cl.Message(
+                content=f"✅ Opened {url} in your browser"
+            ).send()
+        )
+            
         return {"status": "success", "message": f"Opened {url} in browser"}
     except webbrowser.Error as e:
-        logger.error(f"❌ Browser error: {str(e)}")
-        return {"status": "error", "message": f"Could not open browser: {str(e)}"}
+        error_msg = f"❌ Browser error: {str(e)}"
+        logger.error(error_msg)
+        cl.run_sync(cl.Message(content=error_msg).send())
+        return {"status": "error", "message": str(e)}
     except Exception as e:
-        logger.error(f"❌ Unexpected error: {str(e)}")
-        return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+        error_msg = f"❌ Unexpected error: {str(e)}"
+        logger.error(error_msg)
+        cl.run_sync(cl.Message(content=error_msg).send())
+        return {"status": "error", "message": str(e)}
 
 open_browser = (open_browser_def, open_browser_handler)

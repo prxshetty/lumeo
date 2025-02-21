@@ -4,6 +4,7 @@ import chainlit as cl
 from pydantic import BaseModel, Field
 from utils.ai_models import get_llm
 from utils.common import logger
+from typing import Dict, Any
 
 
 class EmailDraft(BaseModel):
@@ -33,7 +34,7 @@ draft_email_def = {
 }
 
 
-def draft_email_handler(to: str, context: str):
+def draft_email_handler(to: str, context: str) -> Dict[str, Any]:
     """Drafts a personalized email using recipient info and context."""
     try:
         logger.info(f"📧 Drafting email to: {to}")
@@ -74,13 +75,19 @@ def draft_email_handler(to: str, context: str):
             ).send()
         )
 
-        return {"status": "success", "message": "Email draft completed"}
-
+        cl.run_sync(
+            cl.Message(
+                content=f"📧 Email Draft:\n{email_draft.body}",
+                elements=[cl.File(name="draft.txt", content=email_draft.body)]
+            ).send()
+        )
+        
+        return {"status": "success"}
     except Exception as e:
-        error_message = f"Error drafting email: {str(e)}"
-        logger.error(f"❌ {error_message}")
-        cl.run_sync(cl.Message(content=error_message, type="error").send())
-        return {"status": "error", "message": error_message}
+        error_msg = f"✉️ Email Error: {str(e)}"
+        logger.error(f"❌ {error_msg}")
+        cl.run_sync(cl.Message(content=error_msg).send())
+        return {"error": error_msg}
 
 
 draft_email = (draft_email_def, draft_email_handler)

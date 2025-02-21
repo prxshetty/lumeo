@@ -5,19 +5,15 @@ import logging
 from dotenv import load_dotenv
 from together import Together
 from tavily import TavilyClient
-
-# Load environment variables
 load_dotenv()
 
-# Setup logging
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Scratchpad directory
 scratch_pad_dir = "./scratchpad"
 os.makedirs(scratch_pad_dir, exist_ok=True)
 
-# Initialize clients with error handling
 together_client = None
 tavily_client = None
 

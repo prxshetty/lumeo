@@ -11,6 +11,8 @@ import json
 from tools import tools
 from utils.common import logger
 import time
+import sqlite3
+from datetime import datetime
 
 from speechmatics_flow.client import WebsocketClient
 from speechmatics_flow.models import (
@@ -64,14 +66,16 @@ async def message_handler(msg: dict):
             cl.user_session.set("audio_start_time", time.time())
             
         elif message_type == "AddTranscript":
-            transcript = msg.get("metadata", {}).get("transcript", "")
-            if transcript.strip():
-                stream = cl.user_session.get("transcript_stream")
-                if not stream:
-                    stream = cl.Message(author="You", content="")
-                    await stream.stream_token("")  
-                    cl.user_session.set("transcript_stream", stream)                
-                await stream.stream_token(transcript + " ")
+            transcript = msg.get("metadata", {}).get("transcript", "").strip()
+            if transcript:
+                buffer = cl.user_session.get("transcript_buffer", [])
+                buffer.append(transcript)
+                cl.user_session.set("transcript_buffer", buffer)
+                cl.user_session.set("last_buffer_update", time.time())
+                
+                # Check if transcript ends with sentence terminator
+                if transcript[-1] in ('.', '?', '!'):
+                    await flush_transcript_buffer()
 
         elif message_type == "ResponseCompleted":
             if content := msg.get("content", ""):
@@ -128,7 +132,24 @@ async def tool_handler(msg: dict):
             tool_func = tool_tuple[1]
             
             result = tool_func(**tool_params)            
-            time.sleep(0.1)            
+            time.sleep(0.1)
+            
+            # Log tool usage
+            session_id = cl.user_session.get("id", "unknown_session")
+            try:
+                conn = sqlite3.connect('database.db')
+                c = conn.cursor()
+                c.execute("INSERT INTO transcripts (timestamp, content, tool_name, session_id) VALUES (?, ?, ?, ?)",
+                        (datetime.now().isoformat(), 
+                         f"Executed {tool_name} with params: {json.dumps(tool_params)}",
+                         tool_name,
+                         session_id))
+                conn.commit()
+                conn.close()
+                logger.info(f"💾 Saved tool usage: {tool_name}")
+            except Exception as e:
+                logger.error(f"❌ Failed to save tool usage: {str(e)}")
+            
             if isinstance(result, dict):
                 response_content = json.dumps(result)
             else:
@@ -182,15 +203,32 @@ async def setup_client():
 
     return client
 
+def init_db():
+    """Initialize database and create tables"""
+    conn = sqlite3.connect('database.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS transcripts
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  timestamp TEXT NOT NULL,
+                  content TEXT NOT NULL,
+                  tool_name TEXT,
+                  session_id TEXT NOT NULL)''')
+    conn.commit()
+    conn.close()
+
 @cl.on_chat_start
 async def start():
     """Initialize chat session"""
+    init_db()  
     cl.user_session.set("track_id", str(uuid4()))
     client = await setup_client()
     cl.user_session.set("client", client)
     cl.user_session.set("audio_chunks", asyncio.Queue())  
+    cl.user_session.set("transcript_buffer", [])
+    cl.user_session.set("last_buffer_update", time.time())
     
     asyncio.create_task(audio_playback())
+    asyncio.create_task(buffer_monitor())
     
     await cl.Message("Welcome to Lumeo! Press the microphone to start.").send()
 
@@ -274,3 +312,30 @@ async def on_stop():
     client = cl.user_session.get("client")
     if client:
         await client.close()
+
+async def flush_transcript_buffer():
+    """Save buffered transcripts as a single entry"""
+    buffer = cl.user_session.get("transcript_buffer", [])
+    if buffer:
+        full_transcript = " ".join(buffer)
+        session_id = cl.user_session.get("id", "unknown_session")
+        
+        try:
+            conn = sqlite3.connect('database.db')
+            c = conn.cursor()
+            c.execute("INSERT INTO transcripts (timestamp, content, session_id) VALUES (?, ?, ?)",
+                    (datetime.now().isoformat(), full_transcript, session_id))
+            conn.commit()
+            conn.close()
+            logger.info(f"💾 Saved complete transcript: {full_transcript[:50]}...")
+        except Exception as e:
+            logger.error(f"❌ Failed to save transcript: {str(e)}")
+        
+        cl.user_session.set("transcript_buffer", [])
+
+async def buffer_monitor():
+    while True:
+        last_update = cl.user_session.get("last_buffer_update", 0)
+        if time.time() - last_update > 2.0:  # 2 second timeout
+            await flush_transcript_buffer()
+        await asyncio.sleep(0.5)

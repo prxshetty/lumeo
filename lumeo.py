@@ -230,7 +230,8 @@ async def start():
     asyncio.create_task(audio_playback())
     asyncio.create_task(buffer_monitor())
     
-    await cl.Message("Welcome to Lumeo! Press the microphone to start.").send()
+    await cl.Message(content = "👋🏽 Hi there, Press 'P' to start or stop talking with me",
+                     author = "Lumeo").send()
 
 async def audio_generator():
     """Async generator for audio chunks"""

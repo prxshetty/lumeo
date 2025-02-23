@@ -13,6 +13,8 @@ from utils.common import logger
 import time
 import sqlite3
 from datetime import datetime
+from typing import Optional
+import re
 
 from speechmatics_flow.client import WebsocketClient
 from speechmatics_flow.models import (
@@ -27,6 +29,7 @@ from speechmatics_flow.tool_function_param import ToolFunctionParam
 
 import os
 from dotenv import load_dotenv
+from chainlit.input_widget import TextInput
 load_dotenv()
 
 CHUNK_SIZE = 1024
@@ -62,20 +65,48 @@ async def audio_playback():
 async def message_handler(msg: dict):
     if isinstance(msg, dict):
         message_type = msg.get("message", "")
-        if message_type == "ConversationStarted":
-            cl.user_session.set("audio_start_time", time.time())
-            
-        elif message_type == "AddTranscript":
+        if message_type == "AddTranscript":
             transcript = msg.get("metadata", {}).get("transcript", "").strip()
             if transcript:
-                buffer = cl.user_session.get("transcript_buffer", [])
-                buffer.append(transcript)
-                cl.user_session.set("transcript_buffer", buffer)
-                cl.user_session.set("last_buffer_update", time.time())
+                logger.info(f"🎤 Processing transcript: {transcript}")
                 
-                # Check if transcript ends with sentence terminator
-                if transcript[-1] in ('.', '?', '!'):
-                    await flush_transcript_buffer()
+                # YouTube notes handling
+                if "generate notes" in transcript.lower():
+                    url = cl.user_session.get("youtube_url")
+                    
+                    if not url:
+                        await cl.Message(
+                            content="Please provide a YouTube URL using the text input above first.",
+                            author="Lumeo"
+                        ).send()
+                        return
+                    
+                    if not re.match(r'^https?://(www\.)?(youtube\.com|youtu\.be)/', url):
+                        await cl.Message(
+                            content="❌ Invalid YouTube URL format. Please check the URL and try again.",
+                            author="Lumeo"
+                        ).send()
+                        return
+                    
+                    await cl.Message(content="🔍 Processing video...").send()
+                    
+                    from tools.ytnotes import generate_youtube_notes_handler
+                    result = await generate_youtube_notes_handler(url)
+                    
+                    if "notes" in result:
+                        await cl.Message(
+                            content=f"📝 Here are your notes:\n\n{result['notes']}",
+                            author="Lumeo"
+                        ).send()
+                        return
+                    elif "error" in result:
+                        await cl.Message(
+                            content=f"❌ Error: {result['error']}",
+                            author="Lumeo"
+                        ).send()
+                        return
+                
+                return
 
         elif message_type == "ResponseCompleted":
             if content := msg.get("content", ""):
@@ -125,30 +156,57 @@ async def tool_handler(msg: dict):
             await cl.Message(
                 content=f"Opening website {tool_params.get('url', '')} in your browser..."
             ).send()
+        elif tool_name == "generate_youtube_notes":
+            await cl.Message(
+                content=f"📝 Generating notes from YouTube video: {tool_params.get('youtube_url', '')}..."
+            ).send()
         
         tool_tuple = next((tool for tool in tools if tool[0]["name"] == tool_name), None)
         
         if tool_tuple:
-            tool_func = tool_tuple[1]
-            
-            result = tool_func(**tool_params)            
-            time.sleep(0.1)
-            
-            # Log tool usage
+            tool_func = tool_tuple[1]            
+            if asyncio.iscoroutinefunction(tool_func):
+                result = await tool_func(**tool_params)
+            else:
+                result = tool_func(**tool_params)
+                
+            time.sleep(0.1)            
             session_id = cl.user_session.get("id", "unknown_session")
             try:
                 conn = sqlite3.connect('database.db')
                 c = conn.cursor()
-                c.execute("INSERT INTO transcripts (timestamp, content, tool_name, session_id) VALUES (?, ?, ?, ?)",
-                        (datetime.now().isoformat(), 
-                         f"Executed {tool_name} with params: {json.dumps(tool_params)}",
-                         tool_name,
-                         session_id))
+                c.execute("""
+                    INSERT INTO transcripts 
+                    (timestamp, content, tool_name, session_id, metadata) 
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    datetime.now().isoformat(), 
+                    f"Executed {tool_name} with params: {json.dumps(tool_params)}",
+                    tool_name,
+                    session_id,
+                    json.dumps({"result": str(result)})
+                ))
                 conn.commit()
                 conn.close()
                 logger.info(f"💾 Saved tool usage: {tool_name}")
             except Exception as e:
                 logger.error(f"❌ Failed to save tool usage: {str(e)}")
+            if tool_name == "generate_youtube_notes" and isinstance(result, dict):
+                if "error" in result:
+                    await cl.Message(
+                        content=f"❌ {result['error']}",
+                        author="Lumeo"
+                    ).send()
+                elif "notes" in result:
+                    await cl.Message(
+                        content=result["notes"],
+                        author="Lumeo"
+                    ).send()                    
+                    if "file_path" in result:
+                        await cl.Message(
+                            content=f"✅ Notes have been saved to: {result['file_path']}",
+                            author="Lumeo"
+                        ).send()
             
             if isinstance(result, dict):
                 response_content = json.dumps(result)
@@ -163,9 +221,7 @@ async def tool_handler(msg: dict):
             }            
             client = cl.user_session.get("client")
             if client and client.websocket:
-                cl.run_sync(
-                    client.websocket.send(json.dumps(response_message))
-                )
+                await client.websocket.send(json.dumps(response_message))
             
             return result
             
@@ -198,40 +254,66 @@ async def setup_client():
     )    
     client.add_event_handler(ServerMessageType.AddAudio, binary_msg_handler)
     client.add_event_handler(ServerMessageType.AddTranscript, message_handler)
-    client.add_event_handler(ServerMessageType.ResponseCompleted, message_handler)
     client.add_event_handler(ServerMessageType.ToolInvoke, tool_handler)
 
     return client
 
 def init_db():
     """Initialize database and create tables"""
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS transcripts
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  timestamp TEXT NOT NULL,
-                  content TEXT NOT NULL,
-                  tool_name TEXT,
-                  session_id TEXT NOT NULL)''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect('database.db')
+        c = conn.cursor()        
+        c.execute('DROP TABLE IF EXISTS transcripts')
+        c.execute('''CREATE TABLE IF NOT EXISTS transcripts
+                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     timestamp TEXT NOT NULL,
+                     content TEXT NOT NULL,
+                     tool_name TEXT,
+                     session_id TEXT NOT NULL,
+                     metadata TEXT)''')
+        conn.commit()
+        conn.close()
+        logger.info("✅ Database initialized successfully")
+    except Exception as e:
+        logger.error(f"❌ Database initialization error: {str(e)}")
 
 @cl.on_chat_start
 async def start():
     """Initialize chat session"""
-    init_db()  
+    init_db()
     cl.user_session.set("track_id", str(uuid4()))
     client = await setup_client()
     cl.user_session.set("client", client)
-    cl.user_session.set("audio_chunks", asyncio.Queue())  
+    cl.user_session.set("audio_chunks", asyncio.Queue())
     cl.user_session.set("transcript_buffer", [])
     cl.user_session.set("last_buffer_update", time.time())
+    
+    # Initialize YouTube URL storage
+    cl.user_session.set("youtube_url", None)
+    
+    # Configure persistent text input
+    settings = await cl.ChatSettings(
+        [
+            TextInput(
+                id="youtube_url",
+                label="YouTube Video URL",
+                placeholder="Paste URL here",
+                tooltip="Enter YouTube URL to generate notes",
+            )
+        ]
+    ).send()
+    
+    # Store initial URL if provided
+    if url := settings.get("youtube_url"):
+        cl.user_session.set("youtube_url", url)
     
     asyncio.create_task(audio_playback())
     asyncio.create_task(buffer_monitor())
     
-    await cl.Message(content = "👋🏽 Hi there, Press 'P' to start or stop talking with me",
-                     author = "Lumeo").send()
+    await cl.Message(
+        content="👋 Hi there! Paste a YouTube URL above and say 'generate notes' to get started.",
+        author="Lumeo"
+    ).send()
 
 async def audio_generator():
     """Async generator for audio chunks"""
@@ -286,8 +368,8 @@ async def on_audio_start():
             template_id="flow-service-assistant-humphrey",
             template_variables={
                 "persona": "Your name is Lumeo, a voice-interactive AI assistant",
-                "style": "Be Friendly and Helpful. You are a helpful assistant that can help with a variety of tasks.",
-                "context": "Provide concise answers using available tools"
+                "style": "Be direct and don't ask follow-up questions. Use available tools automatically.",
+                "context": "You have access to YouTube URL from user input. When user says 'generate notes' or similar, automatically use generate_youtube_notes tool with the stored URL. Never ask for URLs - use the stored value."
             }
         ),
         tools=[ToolFunctionParam(type="function", function=tool[0]) 
@@ -324,8 +406,16 @@ async def flush_transcript_buffer():
         try:
             conn = sqlite3.connect('database.db')
             c = conn.cursor()
-            c.execute("INSERT INTO transcripts (timestamp, content, session_id) VALUES (?, ?, ?)",
-                    (datetime.now().isoformat(), full_transcript, session_id))
+            c.execute("""
+                INSERT INTO transcripts 
+                (timestamp, content, session_id, metadata) 
+                VALUES (?, ?, ?, ?)
+            """, (
+                datetime.now().isoformat(), 
+                full_transcript, 
+                session_id,
+                json.dumps({"source": "voice_transcript"})
+            ))
             conn.commit()
             conn.close()
             logger.info(f"💾 Saved complete transcript: {full_transcript[:50]}...")
@@ -340,3 +430,51 @@ async def buffer_monitor():
         if time.time() - last_update > 2.0:  # 2 second timeout
             await flush_transcript_buffer()
         await asyncio.sleep(0.5)
+
+async def extract_youtube_url(transcript: str) -> Optional[str]:
+    """Extract YouTube URL from transcript text using regex"""
+    import re
+    # Match various YouTube URL formats
+    pattern = r'(https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[\w-]{11})'
+    match = re.search(pattern, transcript)
+    return match.group(0) if match else None
+
+# Add this new function to handle YouTube note generation
+async def create_youtube_notes(url: str) -> Optional[str]:
+    """Generate notes from YouTube URL using ytnotes tool"""
+    try:
+        logger.info(f"🎬 Starting note generation for URL: {url}")
+        from tools.ytnotes import generate_youtube_notes_handler
+        result = await generate_youtube_notes_handler(url)
+        
+        logger.info(f"📊 Note generation result: {result}")
+        
+        if "error" in result:
+            error_msg = f"Error: {result['error']}"
+            logger.error(f"❌ {error_msg}")
+            return error_msg
+        
+        notes = result.get("notes", "No notes generated")
+        logger.info(f"✅ Successfully generated notes")
+        return notes
+    except Exception as e:
+        error_msg = f"Failed to generate notes: {str(e)}"
+        logger.error(f"❌ {error_msg}")
+        return error_msg
+
+@cl.on_settings_update
+async def handle_settings_update(settings):
+    """Handle updates to YouTube URL"""
+    if youtube_url := settings.get("youtube_url"):
+        # Improved URL validation
+        if re.match(r'^https?://(www\.)?(youtube\.com|youtu\.be)/.+', youtube_url):
+            cl.user_session.set("youtube_url", youtube_url)
+            await cl.Message(
+                content=f"✅ YouTube URL saved: {youtube_url}",
+                author="Lumeo"
+            ).send()
+        else:
+            await cl.Message(
+                content="❌ Invalid YouTube URL format. Please check and try again.",
+                author="Lumeo"
+            ).send()

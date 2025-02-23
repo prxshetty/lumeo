@@ -8,3 +8,4 @@ chainlit.md
 __pycache__/
 scratchpad
 database.db
+captions/
